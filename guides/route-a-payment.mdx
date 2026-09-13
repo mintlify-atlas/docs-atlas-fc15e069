@@ -1,0 +1,335 @@
+---
+title: "Route a Bitcoin Payment Across L1 and L2s"
+sidebarTitle: "Route a Payment"
+description: "Use routePayment() to resolve the optimal route from Bitcoin L1 to any L2 — Stacks, BOB, Rootstock, or Citrea — and get a step-by-step execution plan."
+---
+
+`routePayment()` is the core of Peel. You describe a payment intent — who is sending, where the funds are going, and how many sats — and the engine resolves the best route, checks network health, estimates fees, and returns an ordered list of steps for you to execute. The engine never moves funds itself; every action requires your explicit instruction through an external signer.
+
+<Steps>
+
+### Build a BRID identity
+
+All Peel operations start with a `BridIdentityMap` — a unified identity that ties together your Bitcoin, Stacks, and EVM addresses under a single secp256k1 public key. There are two ways to build one.
+
+**From a Bitcoin message signature (BRID proof):** The wallet signs a canonical challenge message to reveal its public key without ever exposing the private key.
+
+```ts
+import { buildBridIdentityMap, buildIdentityProofMessage } from "@peelbtc/core";
+
+const address = "bc1q...";
+const message = buildIdentityProofMessage(address);
+// → "BRID Identity Proof:\nBitcoin Address: bc1q..."
+
+// Wallet signs `message` with the P2WPKH key for `address`
+const sigBase64 = "<base64-encoded 65-byte signature from OWS>";
+
+const identity = buildBridIdentityMap(address, message, sigBase64);
+// identity.root        → "bc1q..."
+// identity.publicKey   → "0365b706..." (33-byte compressed pubkey, hex)
+// identity.derived     → [bitcoin, stacks, bob, rootstock, citrea]
+```
+
+**From a known public key:** If you already have the 33-byte compressed pubkey — for example from `ows wallet info --json` — skip the signing step entirely.
+
+```ts
+import { buildIdentityFromPublicKey } from "@peelbtc/core";
+
+const identity = buildIdentityFromPublicKey("0365b706...", false); // false = mainnet
+```
+
+### Call routePayment()
+
+Pass the identity and a `RouteIntent` to `routePayment()`. The function resolves the full pipeline — address detection, balance checks, liveness, scoring, step construction — and returns a `RoutePlan`.
+
+```ts
+import { routePayment } from "@peelbtc/sdk";
+
+const plan = await routePayment({
+  from: identity,
+  to: "SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7",
+  amountSats: 100_000n,
+});
+
+// plan.intent  — resolved routing decision (chain, bridge, fees, timing)
+// plan.steps[] — ordered steps to execute
+```
+
+The `RouteIntent` interface accepts the following fields:
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `from` | `BridIdentityMap` | ✅ | Source wallet — all chain addresses and balances derive from here |
+| `to` | `string` | ✅ | Destination address in any supported format (Bitcoin, Stacks, EVM `0x...`) |
+| `amountSats` | `bigint` | ✅ | Amount to route in satoshis |
+| `destinationChain` | `"bob" \| "rootstock" \| "citrea"` | — | Required when `to` is a `0x...` address and you want a specific EVM chain |
+| `preferredBridge` | `"flyover" \| "sbtc" \| "bob-gateway"` | — | Force a specific bridge when multiple options exist |
+| `maxBridgeFeeSats` | `bigint` | — | Exclude routes with a bridge fee above this threshold |
+| `maxTimeSecs` | `number` | — | Exclude routes that settle slower than this (seconds) |
+| `memo` | `string` | — | Human-readable note embedded in the transaction (max 13 bytes UTF-8) |
+| `scoreWeights` | `Partial<ScoreWeights>` | — | Override the default scoring weights |
+| `onIntentResolved` | `(intent) => Promise<void>` | — | Opt-in telemetry callback fired after scoring |
+
+### Direct transfer example (Rootstock → Rootstock)
+
+When the sender already holds rBTC on Rootstock and the destination is a Rootstock address, the engine selects a direct transfer — no bridge required.
+
+```ts
+import { routePayment } from "@peelbtc/sdk";
+import { buildBridIdentityMap, buildIdentityProofMessage } from "@peelbtc/core";
+
+const identity = buildBridIdentityMap(address, message, sigBase64);
+
+const plan = await routePayment({
+  from: identity,
+  to: "0x388C818CA8B9251b393131C08a736A67ccB19297",
+  amountSats: 15_000n,
+  destinationChain: "rootstock",
+});
+
+// plan.intent.route     → "direct"
+// plan.intent.bridge    → undefined
+// plan.steps[0].type    → "evm-transfer"
+// plan.steps[0].chain   → "rootstock"
+```
+
+The execution step tells you exactly which SDK functions to call. For a Rootstock direct transfer:
+
+```ts
+import {
+  buildRootstockTransfer, prepareRootstockTx,
+  serializeRootstockTx, encodeRootstockSignedTx, broadcastRootstockTx,
+} from "@peelbtc/sdk";
+
+const step = plan.steps[0]; // EvmTransferStep
+const intent = buildRootstockTransfer(step.from, step.to, step.amountWei, false);
+const prepared = await prepareRootstockTx(intent, false);
+const unsignedHex = serializeRootstockTx(prepared);
+
+// ows sign tx --chain evm --tx <unsignedHex> --json
+const owsSig = { signature: "<hex r||s||v from OWS>" };
+const signedHex = encodeRootstockSignedTx(prepared, owsSig);
+const txHash = await broadcastRootstockTx(signedHex, false);
+```
+
+### Bridge transfer example (Bitcoin L1 → Stacks via sBTC)
+
+When the sender's funds are on Bitcoin L1 and the recipient is a Stacks address, the engine selects the sBTC peg-in bridge.
+
+```ts
+import {
+  routePayment, buildSbtcDepositPlan, notifySbtcDeposit, pollSbtcDepositStatus,
+} from "@peelbtc/sdk";
+
+const plan = await routePayment({
+  from: identity,
+  to: "SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7",
+  amountSats: 100_000n,
+});
+
+// plan.intent.route     → "bridge"
+// plan.intent.bridge    → "sbtc"
+// plan.steps[0].type    → "bridge-deposit"
+// plan.steps[1].type    → "bridge-notify"
+
+const depositStep = plan.steps[0]; // BridgeDepositStep
+
+// Get the P2TR deposit address from the sBTC Signers
+const sbtcPlan = await buildSbtcDepositPlan(depositStep.params);
+// sbtcPlan.depositAddress → send BTC here (include depositStep.peelMemo as OP_RETURN)
+
+// After the OWS BTC transaction is in the mempool, notify signers
+const txHex = await fetch(`https://mempool.space/api/tx/${txid}/hex`).then(r => r.text());
+await notifySbtcDeposit(sbtcPlan, txHex);
+
+// Poll until sBTC is minted (~20 minutes)
+const status = await pollSbtcDepositStatus(txid);
+// status.status: "pending" | "confirmed" | "failed"
+```
+
+### Understand the returned plan
+
+The `RoutePlan` returned by `routePayment()` has two top-level properties:
+
+```ts
+interface RoutePlan {
+  intent: ResolvedIntent; // fully resolved routing decision
+  steps: RouteStep[];     // ordered steps to execute
+}
+```
+
+**`plan.intent`** captures the routing decision with full transparency:
+
+```ts
+plan.intent.id                 // UUID — also embedded in every peelMemo
+plan.intent.route              // "direct" | "bridge"
+plan.intent.bridge             // "sbtc" | "flyover" | "bob-gateway" | undefined
+plan.intent.sourceLayer        // "bitcoin" | "stacks" | "bob" | "rootstock" | "citrea"
+plan.intent.destinationLayer   // same options
+plan.intent.estimatedFeeSats   // bigint — total estimated fee
+plan.intent.estimatedTimeSecs  // number — expected settlement time
+plan.intent.networkChecks      // liveness result for each chain checked
+plan.intent.allCandidates      // every scored route, for transparency
+```
+
+**`plan.steps[]`** is an ordered array. Each step is self-contained and typed:
+
+| Step type | What it means |
+|---|---|
+| `btc-send` | Agent builds, signs, and broadcasts a Bitcoin UTXO tx. Include `peelMemo` as OP_RETURN. |
+| `evm-transfer` | Agent calls the chain-specific EVM tx pipeline. Embed `peelMemo` in the `data` field. |
+| `stacks-transfer` | Agent uses the Stacks tx pipeline. `peelMemo` goes in the `memo` field for STX. |
+| `bridge-deposit` | Agent calls the bridge setup function, then sends to the deposit address. |
+| `bridge-notify` | sBTC only — call `notifySbtcDeposit()` after BTC tx is in mempool. |
+| `sbtc-withdrawal` | sBTC peg-out — call `prepareSbtcWithdrawalTx()`, sign, broadcast. |
+
+Iterate steps in order:
+
+```ts
+for (const step of plan.steps) {
+  switch (step.type) {
+    case "btc-send":
+      // handle Bitcoin send
+      break;
+    case "evm-transfer":
+      // handle BOB / Rootstock / Citrea transfer
+      break;
+    case "bridge-deposit":
+      // call bridge-specific setup, then send to depositAddress
+      break;
+    case "bridge-notify":
+      // notify sBTC signers after BTC broadcast
+      break;
+  }
+}
+```
+
+### EVM disambiguation with destinationChain
+
+A `0x...` address is valid on BOB, Rootstock, and Citrea simultaneously. When `destinationChain` is omitted, the engine runs a receiver-activity heuristic: it checks the recipient's BTC-pegged balance on all three EVM chains and prefers the chain where they hold the most.
+
+If you know the destination chain, specify it explicitly to skip the heuristic and guarantee routing to the right chain:
+
+```ts
+const plan = await routePayment({
+  from: identity,
+  to: "0x388C818CA8B9251b393131C08a736A67ccB19297",
+  amountSats: 50_000n,
+  destinationChain: "bob",   // route to BOB, not Rootstock or Citrea
+});
+```
+
+### Apply route constraints
+
+Use `maxBridgeFeeSats` and `maxTimeSecs` to hard-reject routes that are too expensive or too slow. Any candidate violating a constraint is eliminated before scoring.
+
+```ts
+const plan = await routePayment({
+  from: identity,
+  to: "SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7",
+  amountSats: 100_000n,
+  maxBridgeFeeSats: 10_000n,  // reject routes with bridge fee > 10,000 sats
+  maxTimeSecs: 3600,           // reject routes taking longer than 1 hour
+  preferredBridge: "sbtc",    // among viable routes, prefer sBTC
+});
+```
+
+If no candidate survives the constraints, `routePayment()` throws with a descriptive error message.
+
+### Override score weights
+
+The engine scores each candidate 0–100 using four weighted signals. The defaults are tuned for general-purpose routing, but you can override them for specific use cases.
+
+```ts
+const plan = await routePayment({
+  from: identity,
+  to: "SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7",
+  amountSats: 100_000n,
+  scoreWeights: {
+    senderBalance:    50,  // strongly prefer chains where sender has liquidity
+    receiverActivity: 20,  // de-emphasise recipient chain preference
+    feeRate:          20,  // moderate fee sensitivity
+    settlementTime:   10,  // minimal weight on speed
+  },
+});
+```
+
+| Weight | Default | Meaning |
+|---|---|---|
+| `senderBalance` | 35 | Prefer routes that spend the sender's most liquid BTC asset |
+| `receiverActivity` | 25 | Prefer chains where the recipient has the highest BTC balance |
+| `feeRate` | 25 | Prefer cheaper routes (inverted, normalised across candidates) |
+| `settlementTime` | 15 | Prefer faster routes (inverted, normalised across candidates) |
+
+Weights are relative — they are normalised internally and do not need to sum to 100.
+
+### Opt-in telemetry with onIntentResolved
+
+The `onIntentResolved` callback fires after scoring but before the plan is returned. Use it to log routing decisions, send analytics, or record the intent in your own system. The engine itself has no network calls of its own — you control where the data goes.
+
+```ts
+const plan = await routePayment({
+  from: identity,
+  to: "SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7",
+  amountSats: 100_000n,
+  onIntentResolved: async (intent) => {
+    console.log("intent id:", intent.id);
+    console.log("route:", intent.route, intent.bridge ?? "direct");
+    console.log("estimated fee:", intent.estimatedFeeSats.toString(), "sats");
+    console.log("estimated time:", intent.estimatedTimeSecs, "seconds");
+    console.log("source:", intent.sourceLayer, "→ destination:", intent.destinationLayer);
+    // forward to your analytics endpoint, store in a database, etc.
+  },
+});
+```
+
+</Steps>
+
+<Note>
+  Before scoring, the engine performs a liveness check on every chain involved in any candidate route. Chains that fail to respond to an RPC ping within 5 seconds are eliminated entirely — no candidate routed through a dead chain can win, regardless of its score. The results of all liveness checks are available in `plan.intent.networkChecks`.
+</Note>
+
+## Supported routes
+
+| Source | Destination | Route type | Bridge |
+|---|---|---|---|
+| Any chain | Same chain | Direct transfer | None |
+| Bitcoin L1 | Stacks | Bridge | sBTC peg-in |
+| Bitcoin L1 | Rootstock | Bridge | Flyover peg-in |
+| Bitcoin L1 | BOB | Bridge | BOB Gateway |
+| Stacks | Bitcoin L1 | Bridge | sBTC peg-out |
+
+<Note>
+  L2-to-L2 routes (e.g. Stacks → Rootstock) are not supported in v0.1. Citrea is reachable as a direct transfer destination if the sender already holds cBTC on Citrea, but there is no programmatic bridge route to Citrea in the current version.
+</Note>
+
+## Full example — Bitcoin → Rootstock (Flyover peg-in)
+
+```ts
+import { routePayment, RootstockFlyoverBridgeAdapter } from "@peelbtc/sdk";
+import { buildBridIdentityMap, buildIdentityProofMessage } from "@peelbtc/core";
+
+const identity = buildBridIdentityMap(address, message, sigBase64);
+
+const plan = await routePayment({
+  from: identity,
+  to: "0x388C818CA8B9251b393131C08a736A67ccB19297",
+  amountSats: 1_000_000n,
+  destinationChain: "rootstock",
+  maxBridgeFeeSats: 50_000n,
+});
+
+const depositStep = plan.steps[0]; // BridgeDepositStep { bridge: "flyover" }
+
+const adapter = new RootstockFlyoverBridgeAdapter({ disableChecksum: true });
+const peginPlan = await adapter.getPegInPaymentPlan(
+  depositStep.params.amountSats,
+  depositStep.params.recipientRskAddress,
+);
+
+// peginPlan.depositAddress → send BTC here via OWS
+// peginPlan.deadlineUnix   → Unix timestamp; deposit must confirm before this
+
+// Poll until rBTC arrives (~20–60 minutes)
+const status = await adapter.pollStatus(peginPlan.quoteHash);
+```

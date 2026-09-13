@@ -1,72 +1,86 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "name": "Peel",
+  "theme": "luma",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
-  },
-  "favicon": "/favicon.svg",
-  "navigation": {
-    "pages": [
-      {
-        "group": "Getting Started",
-        "pages": [
-          "index",
-          "quickstart"
-        ]
-      }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
+    "primary": "#F7931A",
+    "light": "#FFF4E6",
+    "dark": "#1A0F00"
   },
   "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
     "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "type": "github",
+      "href": "https://github.com/ECBSJ/Peel"
     }
-  },
-  "contextual": {
-    "options": [
-      "copy",
-      "view",
-      "chatgpt",
-      "claude",
-      "perplexity",
-      "mcp",
-      "cursor",
-      "vscode"
-    ]
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
+      "github": "https://github.com/ECBSJ/Peel"
     }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/brid-identity",
+              "concepts/routing-engine",
+              "concepts/supported-networks",
+              "concepts/peel-memo"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/route-a-payment",
+              "guides/fetch-balances",
+              "guides/transactions",
+              "guides/bridges",
+              "guides/recipient-recovery"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "@peelbtc/sdk",
+            "pages": [
+              "api/sdk/route-payment",
+              "api/sdk/fetch-balances",
+              "api/sdk/transactions",
+              "api/sdk/bridges",
+              "api/sdk/evm-recovery"
+            ]
+          },
+          {
+            "group": "@peelbtc/core",
+            "pages": [
+              "api/core/address-derivation",
+              "api/core/identity",
+              "api/core/registry"
+            ]
+          },
+          {
+            "group": "@peelbtc/types",
+            "pages": [
+              "api/types/overview"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

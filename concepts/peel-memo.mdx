@@ -1,0 +1,171 @@
+---
+title: "Peel Memo: Transaction Tagging Protocol"
+sidebarTitle: "Peel Memo"
+description: "How Peel embeds a structured binary tag in every transaction to tie multi-chain execution back to a single routing decision for future indexing."
+---
+
+Every transaction produced by Peel's routing engine carries a small structured binary tag — the Peel memo. Its purpose is indexability: when a future Peel indexer scans Bitcoin, Stacks, and EVM chains, the memo allows it to reconstruct a full cross-chain payment from its constituent transactions, even when those transactions live on different chains with unrelated formats.
+
+## Binary layout
+
+The memo is 21 to 34 bytes, depending on whether an optional user note is present:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  PEEL   │ version │       intentId        │  userMemo   │
+│  4 bytes│  1 byte │       16 bytes        │  0–13 bytes │
+└─────────────────────────────────────────────────────────┘
+  0x50454554  0x01     UUID as raw bytes       UTF-8
+```
+
+| Field | Bytes | Value | Notes |
+|---|---|---|---|
+| `PEEL` magic | 4 | `[0x50, 0x45, 0x45, 0x4c]` | ASCII "PEEL" |
+| `version` | 1 | `0x01` | Encoding version |
+| `intentId` | 16 | UUID v4, dashes stripped | Links all txs to one routing decision |
+| `userMemo` | 0–13 | UTF-8 string | Optional. Truncated at 13 bytes. |
+
+The 34-byte upper bound is set by the Stacks native memo field limit — the tightest constraint across all supported chains. At 21 bytes minimum (no user memo), the layout fits comfortably in every embedding method.
+
+```typescript
+export const PEEL_MEMO_MAGIC = new Uint8Array([0x50, 0x45, 0x45, 0x4c]); // "PEEL"
+export const PEEL_MEMO_VERSION = 0x01;
+```
+
+## The `EncodedMemo` interface
+
+`encodePeelMemo` returns an `EncodedMemo` — the same type used in every `RouteStep`:
+
+```typescript
+interface EncodedMemo {
+  /** Raw bytes: PEEL(4) | version(1) | intentId(16) | userMemo(0-13) */
+  bytes: Uint8Array;
+  /** Lowercase hex, no 0x prefix */
+  hex: string;
+  /** The UUID that was encoded */
+  intentId: string;
+}
+```
+
+## How it is embedded per transaction type
+
+The memo is embedded differently depending on the transaction format. For contract calls (sBTC SIP-010, ERC-20 transfers), the calldata is already occupied and the memo is omitted.
+
+| Tx type | Embedding method | Notes |
+|---|---|---|
+| Bitcoin L1 | Extra `OP_RETURN` output, value = 0 sats | `peelMemo.bytes` as the push data |
+| EVM native transfer | In the tx `data` field | `"0x" + peelMemo.hex` |
+| STX native transfer | In the Stacks `memo` field | 34-byte buffer — fits exactly |
+| sBTC SIP-010 transfer | Omitted | Calldata occupied by `transfer()` |
+| ERC-20 transfer | Omitted | Calldata occupied by `transfer()` |
+
+<Note>
+  Every `RouteStep` that embeds a memo carries the `peelMemo` field pre-populated. The agent does not need to call `encodePeelMemo` manually — `routePayment` encodes it once and attaches the same `EncodedMemo` to every step in the plan.
+</Note>
+
+## The `intentId` links everything together
+
+The `intentId` UUID is generated once per `routePayment` call and embedded in every transaction step that the plan produces. This means:
+
+- A BTC-to-Stacks payment has a Bitcoin transaction (sBTC deposit) and a Stacks transaction (sBTC mint), both carrying the same `intentId` in their respective memo fields.
+- `plan.intent.id` and `step.peelMemo.intentId` are always the same UUID.
+- A future Peel indexer can join all on-chain evidence for a single payment using this UUID as the key — without any off-chain correlation database.
+
+```typescript
+const plan = await routePayment({ from, to, amountSats: 100_000n });
+
+plan.intent.id;                    // "550e8400-e29b-41d4-a716-446655440000"
+plan.steps[0].peelMemo.intentId;  // "550e8400-e29b-41d4-a716-446655440000" ← same
+plan.steps[1].peelMemo?.intentId; // "550e8400-e29b-41d4-a716-446655440000" ← same
+```
+
+## The optional `userMemo`
+
+Set the `memo` field on `RouteIntent` to embed a human-readable note alongside the Peel tag. The note is capped at **13 bytes UTF-8** — the Stacks 34-byte memo field minus the 21-byte Peel header.
+
+```typescript
+const plan = await routePayment({
+  from: identity,
+  to: "SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7",
+  amountSats: 50_000n,
+  memo: "invoice #42",  // max 13 bytes UTF-8
+});
+```
+
+<Warning>
+  Multi-byte UTF-8 characters (emoji, accented letters, CJK) consume more than one byte each. `encodePeelMemo` slices at exactly 13 bytes, which may split a multi-byte character. Keep user memos to ASCII for predictable behaviour.
+</Warning>
+
+## Using `encodePeelMemo` directly
+
+You rarely need to call `encodePeelMemo` directly — `routePayment` handles it. But it is exported from `@peelbtc/sdk` for use in custom transaction builders or testing:
+
+```typescript
+import { encodePeelMemo } from "@peelbtc/sdk";
+
+// Encode with just an intentId
+const memo = encodePeelMemo("550e8400-e29b-41d4-a716-446655440000");
+// memo.bytes  → Uint8Array(21) [0x50, 0x45, 0x45, 0x4c, 0x01, ...16 uuid bytes...]
+// memo.hex    → "5045454c01550e8400e29b41d4a716446655440000"
+// memo.intentId → "550e8400-e29b-41d4-a716-446655440000"
+
+// Encode with an optional user memo
+const memoWithNote = encodePeelMemo(
+  "550e8400-e29b-41d4-a716-446655440000",
+  "invoice #42",
+);
+// memo.bytes → Uint8Array(32) — 21 header bytes + 11 UTF-8 bytes for "invoice #42"
+// memo.hex   → "5045454c01550e8400e29b41d4a71644665544000069...
+```
+
+## Embedding examples per chain
+
+<Tabs>
+  <Tab title="Bitcoin OP_RETURN">
+    Add `peelMemo.bytes` as a zero-value `OP_RETURN` output alongside the payment output. OWS handles the serialisation — pass the raw bytes.
+
+    ```typescript
+    // From a BtcSendStep
+    const step: BtcSendStep = plan.steps[0];
+
+    // Construct the Bitcoin transaction with two outputs:
+    //   1. Payment output: step.to, step.amountSats
+    //   2. OP_RETURN output: step.peelMemo.bytes, value = 0 sats
+    const tx = buildBitcoinTx({
+      to: step.to,
+      amountSats: step.amountSats,
+      opReturn: step.peelMemo.bytes, // ← Peel memo as OP_RETURN data
+    });
+    ```
+  </Tab>
+  <Tab title="EVM data field">
+    Set the transaction `data` field to `"0x" + peelMemo.hex`. For native transfers (`ETH`, `RBTC`, `cBTC`), the data field is otherwise empty — Peel uses it for the memo. This field is omitted for ERC-20 calls.
+
+    ```typescript
+    // From an EvmTransferStep
+    const step: EvmTransferStep = plan.steps[0];
+
+    // Rootstock example — prepareRootstockTx reads peelMemo from the step
+    const intent = buildRootstockTransfer(step.from, step.to, step.amountWei, false);
+    // The step's peelMemo.hex is set as the tx data field: "0x5045454c01..."
+    const prepared = await prepareRootstockTx(intent, false);
+    ```
+  </Tab>
+  <Tab title="Stacks memo field">
+    The Stacks `memo` field accepts a 34-byte buffer. The Peel memo (21–34 bytes) fits exactly. Pass `step.peelMemo.bytes` when building the Stacks transaction.
+
+    ```typescript
+    // From a StacksTransferStep
+    const step: StacksTransferStep = plan.steps[0];
+
+    const txRequest = step.asset === "sBTC"
+      ? buildSbtcTransfer(step.from, step.to, step.amountSats, step.publicKey, false)
+      : buildStxTransfer(step.from, step.to, step.amountSats, step.publicKey, false);
+
+    // Attach the Peel memo bytes to the Stacks transaction
+    if (step.peelMemo) txRequest.memo = step.peelMemo.bytes;
+
+    const prepared = await prepareStacksTx(txRequest);
+    ```
+  </Tab>
+</Tabs>

@@ -1,0 +1,229 @@
+---
+title: "Recover Cross-Chain Identity from Any Address"
+sidebarTitle: "Recipient Recovery"
+description: "Derive a recipient's full BRID identity from any Bitcoin, Stacks, or EVM address using on-chain ECDSA recovery — no signing required from the recipient."
+---
+
+Recipient recovery lets you derive a recipient's full cross-chain identity from any of their existing on-chain addresses — without asking them to sign anything. Give Peel any Bitcoin address, Stacks address, or EVM `0x...` address, and it returns a complete `BridIdentityMap` covering Bitcoin, Stacks, BOB, Rootstock, and Citrea.
+
+## Why recovery works
+
+All Peel addresses derive from the same compressed secp256k1 public key. The Bitcoin P2WPKH spending witness includes the raw compressed public key. For Stacks and EVM transactions, ECDSA allows mathematically recovering the signing public key from any already-signed transaction. Once the public key is known, all layer addresses can be derived deterministically.
+
+<Warning>
+  Recovery fails for **receive-only addresses** — addresses that have never sent a transaction have not revealed their public key on-chain. For those wallets, the BRID signing step is still required: the wallet must sign the `buildIdentityProofMessage()` challenge to reveal its public key.
+</Warning>
+
+## Recovery paths
+
+| Source address format | Function package | Source of pubkey |
+|---|---|---|
+| Bitcoin `bc1q...` | `@peelbtc/core` | Compressed pubkey in P2WPKH spending witness |
+| Stacks `SP...` / `ST...` | `@peelbtc/core` | ECDSA recovery from any signed Stacks tx |
+| EVM `0x...` | `@peelbtc/sdk` | ECDSA recovery from any signed EVM tx |
+
+## Bitcoin recovery
+
+```ts
+import { recoverRecipientIdentity, recoverPublicKeyFromAddress } from "@peelbtc/core";
+```
+
+### Full identity from a Bitcoin address
+
+`recoverRecipientIdentity()` in `@peelbtc/core` automatically detects whether the address is a Bitcoin or Stacks address and returns the full `BridIdentityMap`.
+
+```ts
+import { recoverRecipientIdentity } from "@peelbtc/core";
+
+const identity = await recoverRecipientIdentity("bc1qrk3xyz...");
+
+if (!identity) {
+  console.log("Address has never spent a UTXO — public key not on-chain");
+} else {
+  console.log("Public key:   ", identity.publicKey);
+  console.log("Bitcoin root: ", identity.root);
+  console.log("All addresses:", identity.derived.map(d => `${d.layer}: ${d.address}`));
+}
+```
+
+The public key is extracted from the **P2WPKH spending witness** (`scriptWitness[1]`) of any existing transaction sent from that address. The address must have spent at least one UTXO — receive-only addresses return `null`.
+
+### Just the public key
+
+```ts
+import { recoverPublicKeyFromAddress } from "@peelbtc/core";
+
+// Bitcoin address
+const pubkey = await recoverPublicKeyFromAddress("bc1qrk3xyz...");
+// → Uint8Array(33) — 33-byte compressed secp256k1 key, or null
+```
+
+### Recovery options
+
+```ts
+const identity = await recoverRecipientIdentity("bc1q...", {
+  bitcoinApiUrl: "https://mempool.space/api",  // default: mempool.space
+  testnet: false,
+});
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `bitcoinApiUrl` | `https://mempool.space/api` | mempool.space-compatible API base URL |
+| `hiroBaseUrl` | `https://api.hiro.so` | Hiro API base URL (used for Stacks addresses) |
+| `testnet` | `false` | Use testnet APIs |
+
+## Stacks recovery
+
+`recoverRecipientIdentity()` in `@peelbtc/core` handles both Bitcoin (`bc1q...`) and Stacks (`SP...` / `ST...`) addresses — the function auto-detects the format.
+
+```ts
+import { recoverRecipientIdentity } from "@peelbtc/core";
+
+const identity = await recoverRecipientIdentity("SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7");
+
+if (!identity) {
+  console.log("No signed transactions found for this Stacks address");
+} else {
+  console.log("Recovered pubkey:", identity.publicKey);
+  console.log("Bitcoin address: ", identity.root);
+  // identity.derived includes all five layer addresses
+  for (const addr of identity.derived) {
+    console.log(`  ${addr.layer.padEnd(12)} ${addr.address}`);
+  }
+}
+```
+
+For Stacks addresses, pubkey recovery uses **ECDSA recovery from any signed transaction** fetched via the Hiro API. The address must have sent at least one transaction.
+
+### Testnet Stacks addresses
+
+```ts
+const identity = await recoverRecipientIdentity("ST1F7QA2MDF17S807EPA36TSS8AMEFY4KA9TVGWXT", {
+  testnet: true,
+  hiroBaseUrl: "https://api.testnet.hiro.so",
+});
+```
+
+## EVM recovery
+
+EVM recovery lives in `@peelbtc/sdk` (not `@peelbtc/core`) because it requires viem for proper EVM transaction serialisation and public key recovery.
+
+```ts
+import { recoverEvmRecipientIdentity, recoverPublicKeyFromEvmAddress } from "@peelbtc/sdk";
+```
+
+### Full identity from an EVM address
+
+```ts
+const identity = await recoverEvmRecipientIdentity("0x2935C2...", {
+  evmChain: "bob",                                    // "bob" | "rootstock" | "citrea"
+  evmExplorerApiUrl: "https://explorer.gobob.xyz",   // Blockscout API — fast path
+});
+
+if (!identity) {
+  console.log("Address has never sent a transaction");
+} else {
+  console.log("Public key:   ", identity.publicKey);
+  console.log("Bitcoin root: ", identity.root);
+  // identity.derived → [bitcoin, stacks, bob, rootstock, citrea]
+}
+```
+
+### Just the public key
+
+```ts
+const pubkey = await recoverPublicKeyFromEvmAddress("0x2935C2...", {
+  evmChain: "rootstock",
+  evmExplorerApiUrl: "https://explorer.rootstock.io",
+});
+// → Uint8Array(33) — 33-byte compressed pubkey, or null
+```
+
+### EVM recovery options
+
+```ts
+const identity = await recoverEvmRecipientIdentity("0x2935C2...", {
+  evmChain: "citrea",                                       // required — which chain to query
+  evmExplorerApiUrl: "https://explorer.mainnet.citrea.xyz", // Blockscout API (fast path)
+  evmRpcUrl: "https://rpc.mainnet.citrea.xyz",              // override RPC URL
+  evmMaxBlockScan: 200,                                     // fallback block scan limit (default: 100)
+  testnet: false,
+});
+```
+
+| Option | Type | Description |
+|---|---|---|
+| `evmChain` | `"bob" \| "rootstock" \| "citrea"` | EVM chain to query for transactions |
+| `evmExplorerApiUrl` | `string` | Blockscout-compatible explorer API base URL (fast path) |
+| `evmRpcUrl` | `string` | Override the default RPC URL for the chain |
+| `evmMaxBlockScan` | `number` | Max recent blocks to scan in fallback mode (default: 100) |
+| `testnet` | `boolean` | Query testnet RPCs and APIs |
+
+### How EVM recovery works
+
+1. **Find a transaction**: The Blockscout explorer API (`/api/v2/addresses/{address}/transactions?filter=from`) is used to locate any transaction sent by the address. If no `evmExplorerApiUrl` is provided, the adapter falls back to scanning the last `evmMaxBlockScan` blocks via `eth_getBlockByNumber`.
+2. **Recover the public key**: The raw transaction is fetched, the signing hash is reconstructed by stripping the signature fields and re-serialising, and viem's `recoverPublicKey` performs ECDSA recovery.
+3. **Build the identity**: `buildIdentityFromPublicKey()` from `@peelbtc/core` derives all five layer addresses from the recovered compressed pubkey.
+
+### Explorer API URLs
+
+| Chain | Mainnet | Testnet |
+|---|---|---|
+| BOB | `https://explorer.gobob.xyz` | — |
+| Rootstock | `https://explorer.rootstock.io` | — |
+| Citrea | `https://explorer.mainnet.citrea.xyz` | — |
+
+Providing an `evmExplorerApiUrl` is strongly recommended. The block scan fallback is slower and may miss addresses that haven't transacted recently.
+
+## Building an identity from a known public key
+
+If you already have the compressed public key (e.g. from a BRID proof or a previous recovery), use `buildIdentityFromPublicKey()` to skip all network calls:
+
+```ts
+import { buildIdentityFromPublicKey } from "@peelbtc/core";
+
+// Accepts Uint8Array or hex string — both 33-byte compressed formats
+const identity = buildIdentityFromPublicKey("0365b706...", false); // false = mainnet
+
+// Returns the same BridIdentityMap shape as all recovery functions
+console.log(identity.root);       // Bitcoin address
+console.log(identity.publicKey);  // hex pubkey
+console.log(identity.derived);    // all five layer addresses
+```
+
+## Complete usage example — routing to a recovered identity
+
+A common pattern is to recover the recipient's full identity before calling `routePayment()`, so the routing engine has receiver-activity data for all chains:
+
+```ts
+import { recoverEvmRecipientIdentity } from "@peelbtc/sdk";
+import { recoverRecipientIdentity, buildBridIdentityMap, buildIdentityProofMessage } from "@peelbtc/core";
+import { routePayment } from "@peelbtc/sdk";
+
+// Sender identity — from BRID signing
+const senderIdentity = buildBridIdentityMap(senderAddress, message, sigBase64);
+
+// Recipient — recover from any address type
+let recipientIdentity = await recoverEvmRecipientIdentity("0x2935C2...", {
+  evmChain: "bob",
+  evmExplorerApiUrl: "https://explorer.gobob.xyz",
+});
+
+if (!recipientIdentity) {
+  // Recipient has never sent a tx — fall back to routing by address only
+  console.warn("Recipient identity not recoverable; routing by address format");
+}
+
+// Route the payment — the engine will still check receiver activity internally
+const plan = await routePayment({
+  from: senderIdentity,
+  to: "0x2935C2...",
+  amountSats: 50_000n,
+  // destinationChain can be omitted if you trust the receiver heuristic
+});
+```
+
+<Tip>
+  Recipient recovery is most useful when the destination is a `0x...` EVM address and you want to route to the chain where the recipient is most active. The routing engine runs its own receiver heuristic internally via `fetchBalances()`, but calling recovery explicitly before routing lets you inspect or override the result.
+</Tip>

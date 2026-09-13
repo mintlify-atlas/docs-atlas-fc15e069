@@ -1,0 +1,771 @@
+---
+title: "@peelbtc/types: Shared Interfaces and Enums"
+sidebarTitle: "Types Overview"
+description: "Complete reference for every interface, enum, and class exported by @peelbtc/types — the shared type contract across all Peel packages."
+---
+
+`@peelbtc/types` contains zero logic. It is the single source of truth for every TypeScript interface, enum, and class that `@peelbtc/core`, `@peelbtc/sdk`, and any third-party adapter must agree on. Everything is a plain type declaration — no runtime code, no dependencies, no side effects.
+
+<Note>
+`@peelbtc/types` is installed automatically as a dependency of `@peelbtc/sdk`. Most application developers never need to install it directly. It is useful when you are **building a custom adapter** — a `NetworkAdapter`, `BridgeAdapter`, or `SignerAdapter` — and want the type contract without pulling in the full SDK.
+</Note>
+
+---
+
+## Adapters
+
+Types from `adapter.ts` define the pluggable interface contracts that let third-party chains and signers integrate with Peel.
+
+### `NetworkAdapter`
+
+The contract each chain implementation must satisfy to participate in routing and transaction construction.
+
+```typescript
+interface NetworkAdapter {
+  readonly id: string;
+  readonly name: string;
+
+  parseAddress(address: string, networkHint?: string): AddressParseResult | null;
+
+  buildSighash(
+    intent: PaymentIntent,
+    senderPubkey: Uint8Array,
+  ): Promise<SighashResult>;
+
+  assembleSignedTx(sighash: SighashResult, signature: Signature): string;
+
+  broadcast(signedTxHex: string, intent: PaymentIntent): Promise<PaymentReceipt>;
+
+  estimateFee(intent: PaymentIntent): Promise<bigint>;
+}
+```
+
+<ResponseField name="id" type="string">
+  Unique network identifier matching `NetworkConfig.id`, e.g. `"bitcoin"`, `"stacks"`, `"bob"`.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Human-readable display name.
+</ResponseField>
+
+<ResponseField name="parseAddress(address, networkHint?)" type="AddressParseResult | null">
+  Attempt to recognize and parse an address string. Returns `null` if this adapter does not own the format. Must never throw.
+</ResponseField>
+
+<ResponseField name="buildSighash(intent, senderPubkey)" type="Promise<SighashResult>">
+  Build the 32-byte hash to sign for a given `PaymentIntent`. Accepts the sender's 33-byte compressed public key to construct the transaction and derive the sender address.
+</ResponseField>
+
+<ResponseField name="assembleSignedTx(sighash, signature)" type="string">
+  Combine the `SighashResult` (unsigned tx bytes) with the `Signature` to produce a hex-encoded signed transaction ready for broadcast.
+</ResponseField>
+
+<ResponseField name="broadcast(signedTxHex, intent)" type="Promise<PaymentReceipt>">
+  Submit the hex-encoded signed transaction to the network. Returns a `PaymentReceipt` with the txid and explorer URL.
+</ResponseField>
+
+<ResponseField name="estimateFee(intent)" type="Promise<bigint>">
+  Estimate the fee for a `PaymentIntent` in satoshis. Called before signing to populate `RouteQuote.estimatedFeeSats`.
+</ResponseField>
+
+---
+
+### `BridgeAdapter`
+
+The contract each bridge implementation must satisfy to enable BTC-to-L2 deposits via Peel.
+
+```typescript
+interface BridgeAdapter {
+  readonly id: string;
+  readonly name: string;
+  readonly targetNetwork: string;
+  readonly mintedAsset: string;
+  readonly minDepositSats: bigint;
+
+  initiateDeposit(
+    amountSats: bigint,
+    recipientAddress: string,
+  ): Promise<BridgeDepositResult>;
+
+  pollStatus(trackingId: string): Promise<BridgeStatusResult>;
+
+  estimateMintTime(): number;
+}
+```
+
+<ResponseField name="id" type="string">
+  Unique bridge identifier, e.g. `"sbtc"`, `"tbtc"`, `"rbtc"`, `"cbtc"`.
+</ResponseField>
+
+<ResponseField name="targetNetwork" type="string">
+  Network id where the bridged asset is minted, e.g. `"stacks"`, `"bob"`.
+</ResponseField>
+
+<ResponseField name="mintedAsset" type="string">
+  Symbol of the asset minted on the target network, e.g. `"sBTC"`, `"tBTC"`.
+</ResponseField>
+
+<ResponseField name="minDepositSats" type="bigint">
+  Minimum deposit in satoshis. Deposits below this threshold cause a `BRIDGE_MINIMUM_NOT_MET` error.
+</ResponseField>
+
+<ResponseField name="initiateDeposit(amountSats, recipientAddress)" type="Promise<BridgeDepositResult>">
+  Start a bridge deposit. Returns the deposit address and a tracking ID.
+</ResponseField>
+
+<ResponseField name="pollStatus(trackingId)" type="Promise<BridgeStatusResult>">
+  Poll the status of an in-flight deposit by the tracking ID from `BridgeDepositResult`.
+</ResponseField>
+
+<ResponseField name="estimateMintTime()" type="number">
+  Estimated time in seconds for BTC to be minted as the bridged asset on the target network.
+</ResponseField>
+
+---
+
+### `SignerAdapter`
+
+The contract any signing implementation must satisfy. All chains reduce signing to a single primitive: sign a 32-byte secp256k1 hash.
+
+```typescript
+interface SignerAdapter {
+  readonly name: string;
+
+  canSign(network: string): boolean;
+
+  sign(hash: Uint8Array, options: SignOptions): Promise<Signature>;
+
+  getPublicKey(options: SignOptions): Promise<Uint8Array>;
+}
+```
+
+<ResponseField name="name" type="string">
+  Adapter identifier, e.g. `"ows"`, `"metamask"`, `"walletconnect"`.
+</ResponseField>
+
+<ResponseField name="canSign(network)" type="boolean">
+  Returns `true` if this adapter can sign transactions for the given network id. Used by the router to select the right adapter at runtime.
+</ResponseField>
+
+<ResponseField name="sign(hash, options)" type="Promise<Signature>">
+  Sign a 32-byte hash using secp256k1 ECDSA. Returns a `Signature` with `bytes` (64-byte r‖s) and optional `recoveryId`.
+</ResponseField>
+
+<ResponseField name="getPublicKey(options)" type="Promise<Uint8Array>">
+  Return the 33-byte compressed secp256k1 public key for the active key. Used by transaction builders to derive addresses.
+</ResponseField>
+
+---
+
+### `Signature`
+
+```typescript
+interface Signature {
+  /** Raw 64-byte signature: 32 bytes r + 32 bytes s */
+  bytes: Uint8Array;
+
+  /** Recovery ID (0 or 1). Required by some chains for address recovery. */
+  recoveryId?: number;
+}
+```
+
+---
+
+### `SighashResult`
+
+Returned by `NetworkAdapter.buildSighash()`. Carries both the hash to sign and the opaque unsigned transaction bytes needed by `assembleSignedTx`.
+
+```typescript
+interface SighashResult {
+  /** 32-byte hash to be signed by the SignerAdapter */
+  hash: Uint8Array;
+
+  /**
+   * Serialized unsigned transaction — passed back to assembleSignedTx()
+   * after signing. Format is network-specific.
+   */
+  unsignedTx: Uint8Array;
+
+  /** Network that produced this sighash */
+  network: string;
+
+  /** Human-readable description of this transaction */
+  description: string;
+}
+```
+
+---
+
+### `SignOptions`
+
+Intentionally open-ended. Each signer adapter reads only the fields it needs.
+
+```typescript
+interface SignOptions {
+  /** HD wallet derivation index (default: 0) */
+  index?: number;
+
+  /** Network context — helps adapters select the right key derivation path */
+  network?: string;
+
+  /** Any adapter-specific options (e.g. walletName for OWS, topic for WC) */
+  [key: string]: unknown;
+}
+```
+
+---
+
+### `AddressParseResult`
+
+Returned by `NetworkAdapter.parseAddress()`.
+
+```typescript
+interface AddressParseResult {
+  /** Network id this address belongs to */
+  network: string;
+
+  /** Address encoding format, e.g. "bech32", "c32check", "evm-hex", "p2pkh" */
+  format: string;
+
+  /** Whether this is a testnet address */
+  testnet: boolean;
+
+  /** Normalized address string */
+  address: string;
+}
+```
+
+---
+
+### `BridgeDepositResult`
+
+```typescript
+interface BridgeDepositResult {
+  /** Address or contract to send the BTC deposit to */
+  depositAddress: string;
+
+  /** Pre-built unsigned deposit transaction hex, if the bridge provides one */
+  depositTxHex?: string;
+
+  /** Estimated time for the bridged asset to appear on the target network */
+  estimatedMintTimeSecs: number;
+
+  /** Tracking id for polling status */
+  trackingId?: string;
+
+  /** Human-readable description */
+  description: string;
+}
+```
+
+---
+
+### `BridgeStatus` and `BridgeStatusResult`
+
+```typescript
+type BridgeStatus =
+  | "pending"
+  | "confirming"
+  | "minting"
+  | "completed"
+  | "failed";
+
+interface BridgeStatusResult {
+  status: BridgeStatus;
+  /** BTC L1 deposit txid */
+  sourceTxid?: string;
+  /** L2 mint txid */
+  destinationTxid?: string;
+  /** Number of BTC confirmations so far */
+  confirmations?: number;
+  /** Human-readable status message */
+  message: string;
+}
+```
+
+<ResponseField name="status" type="BridgeStatus">
+  Lifecycle stage of the bridge deposit. Progresses: `pending` → `confirming` → `minting` → `completed` (or `failed` at any stage).
+</ResponseField>
+
+---
+
+## Intent
+
+Types from `intent.ts` describe what a user or agent wants to pay and any constraints on how.
+
+### `PaymentIntent`
+
+The primary input to the Peel routing engine. Describe what you want to pay — Peel figures out how.
+
+```typescript
+interface PaymentIntent {
+  /** Protocol version — always "1.0" for now */
+  version: "1.0";
+
+  /** Recipient address in any supported format */
+  recipient: string;
+
+  /** Amount to send, in satoshis */
+  amountSats: bigint;
+
+  /** Optional human-readable memo / payment reference */
+  memo?: string;
+
+  /**
+   * Network hint to disambiguate addresses valid on multiple chains.
+   * Required for bare 0x addresses (e.g. "bob", "rootstock", "citrea").
+   */
+  networkHint?: string;
+
+  /** Optional caller-specified constraints */
+  constraints?: PaymentConstraints;
+
+  /** UTXOs to spend for Bitcoin L1 payments. Required when routing to Bitcoin L1. */
+  utxos?: Utxo[];
+
+  /** Change address for Bitcoin L1 payments. Defaults to sender address if omitted. */
+  changeAddress?: string;
+
+  /**
+   * EVM transaction nonce. Required when routing to EVM-compatible networks.
+   * Caller is responsible for fetching the current nonce.
+   */
+  nonce?: number;
+}
+```
+
+<Warning>
+All amounts in `PaymentIntent` are **satoshis as `bigint`** to avoid floating-point precision errors. Never use `number` for BTC amounts.
+</Warning>
+
+---
+
+### `PaymentConstraints`
+
+Optional caller-specified limits on the payment route. Routes that cannot satisfy all constraints are rejected.
+
+```typescript
+interface PaymentConstraints {
+  /** Maximum acceptable fee in satoshis */
+  maxFeeSats?: bigint;
+
+  /** Maximum acceptable confirmation time in seconds */
+  maxConfirmTimeSecs?: number;
+
+  /** If true, do not use any bridge — only direct transfers */
+  noBridge?: boolean;
+
+  /** Preferred network id — router will try this network first */
+  preferredNetwork?: string;
+}
+```
+
+---
+
+### `Utxo`
+
+A single unspent transaction output. Callers provide their own UTXOs — Peel never fetches or stores them.
+
+```typescript
+interface Utxo {
+  txid: string;
+  vout: number;
+  /** Value in satoshis */
+  value: bigint;
+  /** Hex-encoded scriptPubKey */
+  scriptPubKey: string;
+}
+```
+
+---
+
+## Network
+
+Types from `network.ts` define the chain registry shape and address derivation types. See also [`@peelbtc/core` Registry](/api/core/registry) for the static registry that uses these types.
+
+### `Caip2` enum
+
+Full CAIP-2 chain identifiers for all networks supported by Peel.
+
+```typescript
+enum Caip2 {
+  BitcoinMainnet   = "bip122:000000000019d6689c085ae165831e93",
+  BitcoinTestnet   = "bip122:000000000933ea01ad0ee984209779ba",
+  StacksMainnet    = "stacks:1",
+  StacksTestnet    = "stacks:2147483648",
+  BobMainnet       = "eip155:60808",
+  BobTestnet       = "eip155:808",
+  RootstockMainnet = "eip155:30",
+  RootstockTestnet = "eip155:31",
+  CitreaMainnet    = "eip155:4114",
+  CitreaTestnet    = "eip155:5115",
+}
+```
+
+---
+
+### `Caip2Namespace` enum
+
+CAIP-2 namespace prefixes. Each namespace maps to one address derivation procedure.
+
+```typescript
+enum Caip2Namespace {
+  /** Bitcoin L1 — P2WPKH bech32 derivation */
+  Bip122 = "bip122",
+  /** Stacks — c32check derivation */
+  Stacks = "stacks",
+  /** All EVM-compatible chains (BOB, Rootstock, Citrea) — keccak256 derivation */
+  Eip155 = "eip155",
+}
+```
+
+<Note>
+`Caip2Namespace` is used on the `namespace` field of `DerivedAddress` rather than `Caip2` because a derived EVM address is simultaneously valid on BOB, Rootstock, and Citrea. The namespace `"eip155"` correctly represents "belongs to the EVM derivation family" without claiming a specific chain.
+</Note>
+
+---
+
+### `NetworkConfig` interface
+
+See the [Registry reference](/api/core/registry#networkconfig-interface) for full field documentation.
+
+```typescript
+interface NetworkConfig {
+  id: string;
+  name: string;
+  caip2: string;
+  nativeAsset: string;
+  rpcUrl: string;
+  explorerUrl: string;
+  addressFormat: string;
+  avgBlockTimeSecs: number;
+  testnet: boolean;
+}
+```
+
+---
+
+### `AssetConfig` interface
+
+See the [Registry reference](/api/core/registry#assetconfig-interface) for full field documentation.
+
+```typescript
+interface AssetConfig {
+  symbol: string;
+  name: string;
+  network: string;
+  decimals: number;
+  isBridgedBtc: boolean;
+  contractAddress?: string;
+  contractName?: string;
+  bridgeAdapterId?: string;
+}
+```
+
+---
+
+### `DerivedAddress` interface
+
+The shape returned by all `derive*Address` functions in `@peelbtc/core`.
+
+```typescript
+interface DerivedAddress {
+  /** The encoded address string (e.g. "bc1q...", "SP...", "0x...") */
+  address: string;
+
+  /** Human-readable layer identifier, e.g. "bitcoin", "stacks", "evm" */
+  layer: string;
+
+  /** CAIP-2 namespace for this derivation rule */
+  namespace: Caip2Namespace;
+
+  /** Encoding format, e.g. "p2wpkh", "c32check", "eip55" */
+  format: string;
+
+  /** Whether this address is for a testnet */
+  testnet: boolean;
+}
+```
+
+---
+
+## Balance
+
+Types from `balance.ts` are returned by `fetchBalances()` in `@peelbtc/sdk`.
+
+### `BalanceKind` type
+
+```typescript
+type BalanceKind = "native" | "token";
+```
+
+Distinguishes a chain's native gas asset (`"native"`) from a contract-based token (`"token"`).
+
+---
+
+### `LayerBalance` interface
+
+Balance for a single asset on a single layer. A layer with two assets (e.g. BOB: ETH + tBTC) produces two `LayerBalance` entries.
+
+```typescript
+interface LayerBalance {
+  /** Layer identifier — "bitcoin", "stacks", "bob", "rootstock", "citrea" */
+  layer: string;
+
+  /** The address queried */
+  address: string;
+
+  /** Asset symbol — "BTC", "STX", "sBTC", "ETH", "tBTC", "RBTC", "cBTC" */
+  asset: string;
+
+  /** Whether this is a native chain asset or a token contract */
+  kind: BalanceKind;
+
+  /**
+   * Raw balance in smallest unit.
+   * Bitcoin / sBTC: satoshis (8 decimals)
+   * STX: microSTX (6 decimals)
+   * ETH / tBTC / RBTC / cBTC: wei (18 decimals)
+   */
+  balance: bigint;
+
+  /** Number of decimal places for this asset */
+  decimals: number;
+
+  /**
+   * Whether this asset is BTC-denominated and contributes to totalBtcSats.
+   * true for: BTC, sBTC, tBTC, RBTC, cBTC.
+   * false for: STX, ETH.
+   */
+  isBtc: boolean;
+
+  /** Whether this balance was fetched from a testnet */
+  testnet: boolean;
+
+  /**
+   * Set when the fetch for this asset failed. Balance will be 0n.
+   * Other layers are unaffected — failures are isolated per asset.
+   */
+  error?: string;
+}
+```
+
+---
+
+### `BalanceMap` interface
+
+Aggregated result returned by `fetchBalances()`.
+
+```typescript
+interface BalanceMap {
+  /** Per-asset balances across all layers */
+  layers: LayerBalance[];
+
+  /**
+   * Total BTC held across all layers, in satoshis.
+   * Sum of all LayerBalance entries where isBtc = true.
+   * EVM wei values are converted to satoshis (wei / 10^10) before summing.
+   */
+  totalBtcSats: bigint;
+
+  /** Unix timestamp (ms) when the fetch was initiated */
+  fetchedAt: number;
+}
+```
+
+---
+
+### `RpcOverrides` interface
+
+Optional per-chain RPC URL overrides. Falls back to the public endpoints in `NETWORKS` when omitted.
+
+```typescript
+interface RpcOverrides {
+  bitcoin?: string;
+  stacks?: string;
+  bob?: string;
+  rootstock?: string;
+  citrea?: string;
+}
+```
+
+---
+
+## Quote
+
+### `RouteQuote` interface
+
+The routing engine's response to a `PaymentIntent` — a complete routing decision before any signing or broadcasting.
+
+```typescript
+interface RouteQuote {
+  /** Target network id (e.g. "bitcoin", "stacks", "bob") */
+  network: string;
+
+  /** Asset to transfer (e.g. "BTC", "sBTC", "tBTC", "cBTC", "rBTC") */
+  asset: string;
+
+  /** Normalized recipient address on the target network */
+  recipient: string;
+
+  /** Amount to transfer, in satoshis */
+  amountSats: bigint;
+
+  /** Estimated fee, in satoshis */
+  estimatedFeeSats: bigint;
+
+  /** Estimated confirmation time in seconds */
+  estimatedConfirmTimeSecs: number;
+
+  /** Whether a bridge deposit is required to acquire the asset */
+  bridgeRequired: boolean;
+
+  /** Bridge adapter id if bridging is required, e.g. "sbtc", "tbtc" */
+  bridgeAdapterId?: string;
+
+  /**
+   * One-sentence human-readable explanation of why this route was chosen.
+   * Always populated — agents must surface this to users before executing.
+   */
+  reason: string;
+
+  /**
+   * Full human-readable summary of the payment.
+   * e.g. "Send 100,000 sats worth of sBTC to SP2J6... on Stacks"
+   */
+  summary: string;
+
+  /** Unix timestamp (ms) after which this quote should be re-fetched */
+  expiresAt: number;
+}
+```
+
+<ResponseField name="reason" type="string">
+  Always populated. A one-sentence explanation of the routing decision that agents and UIs must surface to the user before executing.
+</ResponseField>
+
+<ResponseField name="expiresAt" type="number">
+  Unix timestamp in milliseconds. Fee estimates and bridge conditions change — re-fetch the quote after this time.
+</ResponseField>
+
+---
+
+## Receipt
+
+### `PaymentStatus` type
+
+```typescript
+type PaymentStatus =
+  | "broadcast"   // accepted by network mempool
+  | "confirmed"   // at least one confirmation
+  | "failed";     // rejected or failed to broadcast
+```
+
+---
+
+### `PaymentReceipt` interface
+
+Returned after a signed transaction has been submitted to the network.
+
+```typescript
+interface PaymentReceipt {
+  /** Network the payment was sent on */
+  network: string;
+
+  /** Asset that was transferred */
+  asset: string;
+
+  /** Transaction id as returned by the network */
+  txid: string;
+
+  /** Block explorer URL for this transaction */
+  explorerUrl: string;
+
+  /** Normalized recipient address */
+  recipient: string;
+
+  /** Amount sent, in satoshis */
+  amountSats: bigint;
+
+  /** Fee paid, in satoshis */
+  feeSats: bigint;
+
+  /** Unix timestamp (ms) when the transaction was broadcast */
+  timestamp: number;
+
+  /** Current status of the transaction */
+  status: PaymentStatus;
+
+  /** Hex-encoded signed transaction (useful for debugging / re-broadcast) */
+  rawTxHex: string;
+
+  /** Error message if status is "failed" */
+  error?: string;
+}
+```
+
+---
+
+## Error
+
+### `PeelErrorCode` type
+
+Structured error codes thrown by `PeelError`. All Peel operations throw `PeelError` (never a plain `Error`) when something goes wrong in a predictable, catchable way.
+
+```typescript
+type PeelErrorCode =
+  | "UNKNOWN_ADDRESS"         // address not matched to any known network
+  | "AMBIGUOUS_ADDRESS"       // valid on multiple networks, no hint provided
+  | "NETWORK_DOWN"            // RPC unreachable or returning errors
+  | "UNSUPPORTED_NETWORK"     // recognized but not supported by this implementation
+  | "CONSTRAINTS_UNMET"       // payment violates caller-specified constraints
+  | "INSUFFICIENT_BALANCE"    // wallet does not hold enough of the required asset
+  | "BUILD_FAILED"            // transaction construction or sighash building failed
+  | "SIGN_FAILED"             // signing operation failed
+  | "BROADCAST_FAILED"        // broadcast to the network failed
+  | "BRIDGE_MINIMUM_NOT_MET"  // deposit amount below bridge threshold
+  | "UTXO_REQUIRED"           // Bitcoin UTXOs required but not provided
+  | "INVALID_INTENT";         // PaymentIntent failed validation
+```
+
+---
+
+### `PeelError` class
+
+```typescript
+class PeelError extends Error {
+  readonly code: PeelErrorCode;
+  readonly details?: unknown;
+
+  constructor(code: PeelErrorCode, message: string, details?: unknown);
+}
+```
+
+<ResponseField name="code" type="PeelErrorCode">
+  Machine-readable error code. Use this for programmatic error handling (e.g. showing a specific UI message for `INSUFFICIENT_BALANCE` vs. `NETWORK_DOWN`).
+</ResponseField>
+
+<ResponseField name="details" type="unknown">
+  Optional structured context — e.g. the raw RPC error object, the constraint that was violated, or the estimated fee that exceeded the maximum.
+</ResponseField>
+
+```typescript
+import { PeelError } from "@peelbtc/types";
+
+try {
+  await sdk.routePayment(intent, signer);
+} catch (err) {
+  if (err instanceof PeelError) {
+    switch (err.code) {
+      case "INSUFFICIENT_BALANCE":
+        console.error("Not enough funds:", err.message);
+        break;
+      case "NETWORK_DOWN":
+        console.error("RPC unavailable:", err.details);
+        break;
+      default:
+        throw err; // re-throw unexpected codes
+    }
+  }
+}
+```

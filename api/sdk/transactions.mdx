@@ -1,0 +1,680 @@
+---
+title: "Transaction Helpers for BOB, Rootstock, Citrea, Stacks"
+sidebarTitle: "Transactions"
+description: "API reference for all four chain transaction pipelines: build, prepare, serialize, sign with OWS, encode, and broadcast for BOB, Rootstock, Citrea, and Stacks."
+---
+
+The SDK exports a consistent four-step transaction pipeline for every supported
+chain: **build → prepare → serialize → encode → broadcast**. The build step
+constructs a minimal intent with no live chain data. The prepare step fetches
+the current nonce, gas estimate, and fee data. The serialize step produces the
+unsigned hex blob to pass to OWS for signing. The encode step attaches the OWS
+signature and produces the broadcast-ready hex. The broadcast step submits it
+and returns the transaction hash (or txid on Stacks).
+
+<Note>
+  All four chains use the same OWS Bitcoin signer. BOB and Citrea use
+  `--chain evm` (EIP-1559); Rootstock uses `--chain evm` (legacy); Stacks
+  uses `--chain bitcoin` against the raw `preSignSigHash`.
+</Note>
+
+---
+
+## Import
+
+```typescript
+import {
+  // BOB (EIP-1559, type 2)
+  buildBobEthTransfer, buildBobTokenTransfer,
+  prepareBobTx, serializeBobTx, encodeBobSignedTx, broadcastBobTx,
+
+  // Rootstock (legacy type 0)
+  buildRootstockTransfer,
+  prepareRootstockTx, serializeRootstockTx, encodeRootstockSignedTx, broadcastRootstockTx,
+
+  // Citrea (EIP-1559, type 2)
+  buildCitreaTransfer,
+  prepareCitreaTx, serializeCitreaTx, encodeCitreaSignedTx, broadcastCitreaTx,
+
+  // Stacks (secp256k1, same curve as Bitcoin)
+  buildStxTransfer, buildSbtcTransfer,
+  prepareStacksTx, encodeStacksSignedTx, broadcastStacksTx,
+} from "@peelbtc/sdk";
+```
+
+---
+
+## `OwsSignResult` / Signature type
+
+All four chains accept the same `OwsSignResult` shape from OWS:
+
+```typescript
+interface OwsSignResult {
+  /** Hex-encoded 65-byte signature: r(32) || s(32) || v(1) */
+  signature: string;
+  recoveryId?: number;
+}
+```
+
+<Warning>
+  Always use `ows sign tx`, **not** `ows sign send-tx`. The `send-tx` path
+  expects a typed transaction (`0x01`/`0x02`) and will reject legacy hex from
+  Rootstock. The `sign message` path re-hashes the payload, which breaks Stacks
+  signing. Stacks in particular signs `--chain bitcoin` against the raw
+  pre-hashed `preSignSigHash`.
+</Warning>
+
+---
+
+## BOB
+
+BOB uses **EIP-1559 (type 2)** transactions. Serialized blobs start with `0x02`.
+
+### Lifecycle
+
+```
+buildBobEthTransfer / buildBobTokenTransfer  →  EvmTxRequest
+           ↓
+prepareBobTx(tx, testnet, rpcUrl?)           →  EvmTxPrepared
+           ↓
+serializeBobTx(tx)                           →  Hex  (0x02... unsigned blob)
+           ↓
+ows sign tx --chain evm --tx <hex>           →  r || s || v
+           ↓
+encodeBobSignedTx(tx, sig)                   →  Hex  (signed broadcast-ready blob)
+           ↓
+broadcastBobTx(signedHex, testnet, rpcUrl?)  →  Hex  (tx hash)
+```
+
+### Types
+
+```typescript
+interface EvmTxRequest {
+  from: Address;    // sender address
+  to: Address;      // recipient (or token contract for ERC-20)
+  value: bigint;    // native ETH value in wei — 0n for token transfers
+  data: Hex;        // ABI-encoded calldata — "0x" for plain ETH transfers
+  chainId: number;
+}
+
+interface EvmTxPrepared {
+  from: Address;
+  to: Address;
+  value: bigint;
+  data: Hex;
+  chainId: number;
+  nonce: number;
+  gas: bigint;
+  maxFeePerGas: bigint;
+  maxPriorityFeePerGas: bigint;
+  type: "eip1559";
+}
+```
+
+### `buildBobEthTransfer`
+
+<ParamField body="from" type="Address" required>
+  Sender EVM address.
+</ParamField>
+<ParamField body="to" type="Address" required>
+  Recipient EVM address.
+</ParamField>
+<ParamField body="value" type="bigint" required>
+  Amount in wei.
+</ParamField>
+<ParamField body="testnet" type="boolean" required>
+  `true` → bobSepolia (chainId 808813). `false` → BOB mainnet (chainId 60808).
+</ParamField>
+
+Returns `EvmTxRequest`. No nonce or gas data yet.
+
+### `buildBobTokenTransfer`
+
+<ParamField body="from" type="Address" required>
+  Sender EVM address.
+</ParamField>
+<ParamField body="recipient" type="Address" required>
+  Token recipient EVM address. ABI-encoded into `data`.
+</ParamField>
+<ParamField body="tokenContract" type="Address" required>
+  ERC-20 contract address (e.g. wBTC on BOB mainnet:
+  `0x0555E30da8f98308EdB960aa94C0Db47230d2B9c`).
+</ParamField>
+<ParamField body="amount" type="bigint" required>
+  Transfer amount in the token's smallest unit.
+</ParamField>
+<ParamField body="testnet" type="boolean" required>
+  `true` → bobSepolia. `false` → BOB mainnet.
+</ParamField>
+
+Returns `EvmTxRequest`. The `to` field in the returned request is the token
+contract; the recipient is ABI-encoded in `data` as `transfer(recipient, amount)`.
+
+### `prepareBobTx`
+
+<ParamField body="tx" type="EvmTxRequest" required>
+  Minimal intent from a build function.
+</ParamField>
+<ParamField body="testnet" type="boolean" required>
+  Selects BOB mainnet or bobSepolia RPC.
+</ParamField>
+<ParamField body="rpcUrl" type="string">
+  Optional RPC override. Defaults to the viem chain default.
+</ParamField>
+
+Fetches nonce, gas estimate, and EIP-1559 fee data in parallel. Returns
+`EvmTxPrepared`. Call immediately before signing — nonce and fee data go stale.
+
+### `serializeBobTx`
+
+<ParamField body="tx" type="EvmTxPrepared" required>
+  Prepared transaction from `prepareBobTx`.
+</ParamField>
+
+Returns a `Hex` string (unsigned RLP-encoded `0x02…` blob). Pass this to OWS:
+
+```bash
+ows sign tx --chain evm --tx <unsignedHex> --json
+# Returns: { signature: "<hex r||s||v>" }
+```
+
+### `encodeBobSignedTx`
+
+<ParamField body="tx" type="EvmTxPrepared" required>
+  The same prepared transaction that was serialized.
+</ParamField>
+<ParamField body="sig" type="OwsSignResult" required>
+  OWS sign result. `sig.signature` must be 65 bytes hex (130 hex chars):
+  `r(32) || s(32) || v(1)`. Accepts raw recovery ID (`0`/`1`) or legacy
+  Ethereum form (`27`/`28`) — viem normalises both.
+</ParamField>
+
+Returns broadcast-ready signed `Hex`.
+
+### `broadcastBobTx`
+
+<ParamField body="signedTxHex" type="Hex" required>
+  Output of `encodeBobSignedTx`.
+</ParamField>
+<ParamField body="testnet" type="boolean" required>
+  Selects BOB mainnet or bobSepolia.
+</ParamField>
+<ParamField body="rpcUrl" type="string">
+  Optional RPC override.
+</ParamField>
+
+Returns `Promise<Hex>` — the transaction hash.
+
+### Full BOB example
+
+```typescript
+import {
+  buildBobTokenTransfer,
+  prepareBobTx,
+  serializeBobTx,
+  encodeBobSignedTx,
+  broadcastBobTx,
+} from "@peelbtc/sdk";
+
+const WBTC_MAINNET = "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c";
+
+const intent = buildBobTokenTransfer(
+  "0xSENDER",
+  "0xRECIPIENT",
+  WBTC_MAINNET,
+  100n,   // 100 sats of wBTC
+  false   // mainnet
+);
+
+const prepared = await prepareBobTx(intent, false);
+const unsignedHex = serializeBobTx(prepared);
+
+// ows sign tx --chain evm --tx <unsignedHex> --json
+const owsSig = { signature: "<hex r||s||v from OWS>" };
+
+const signedHex = encodeBobSignedTx(prepared, owsSig);
+const txHash = await broadcastBobTx(signedHex, false);
+console.log("tx hash:", txHash);
+console.log("explorer: https://explorer.gobob.xyz/tx/" + txHash);
+```
+
+---
+
+## Rootstock
+
+Rootstock uses **legacy (type 0) EVM transactions** — no EIP-1559. Uses
+`gasPrice` instead of `maxFeePerGas`. Serialized blobs do **not** start with
+`0x02`.
+
+### Lifecycle
+
+```
+buildRootstockTransfer(from, to, value, testnet)   →  RootstockTxRequest
+           ↓
+prepareRootstockTx(tx, testnet, rpcUrl?)           →  RootstockTxPrepared
+           ↓
+serializeRootstockTx(tx)                           →  Hex  (unsigned legacy hex)
+           ↓
+ows sign tx --chain evm --tx <hex>                 →  r || s || v
+           ↓
+encodeRootstockSignedTx(tx, sig)                   →  Hex
+           ↓
+broadcastRootstockTx(signedHex, testnet, rpcUrl?)  →  Hex  (tx hash)
+```
+
+### Types
+
+```typescript
+interface RootstockTxRequest {
+  from: Address;
+  to: Address;
+  value: bigint;  // RBTC value in wei
+  data: Hex;
+  chainId: number;
+}
+
+interface RootstockTxPrepared {
+  from: Address;
+  to: Address;
+  value: bigint;
+  data: Hex;
+  chainId: number;
+  nonce: number;
+  gas: bigint;
+  gasPrice: bigint;  // legacy — not maxFeePerGas
+  type: "legacy";
+}
+```
+
+### `buildRootstockTransfer`
+
+<ParamField body="from" type="Address" required>Sender EVM address.</ParamField>
+<ParamField body="to" type="Address" required>Recipient EVM address.</ParamField>
+<ParamField body="value" type="bigint" required>Amount in wei.</ParamField>
+<ParamField body="testnet" type="boolean" required>
+  `true` → rootstockTestnet (chainId 31). `false` → rootstock mainnet (chainId 30).
+</ParamField>
+
+Returns `RootstockTxRequest`.
+
+### `prepareRootstockTx`
+
+<ParamField body="tx" type="RootstockTxRequest" required>Minimal intent.</ParamField>
+<ParamField body="testnet" type="boolean" required>Selects mainnet or testnet RPC.</ParamField>
+<ParamField body="rpcUrl" type="string">Optional RPC override.</ParamField>
+
+Fetches nonce, gas estimate, and `gasPrice` (not EIP-1559). Returns `RootstockTxPrepared`.
+
+### `serializeRootstockTx`
+
+<ParamField body="tx" type="RootstockTxPrepared" required>Prepared transaction.</ParamField>
+
+Returns unsigned legacy `Hex`. Will **not** start with `0x02`.
+
+### `encodeRootstockSignedTx`
+
+<ParamField body="tx" type="RootstockTxPrepared" required>The prepared transaction.</ParamField>
+<ParamField body="sig" type="OwsSignResult" required>OWS sign result (65 bytes hex).</ParamField>
+
+Injects OWS signature and applies EIP-155 `v` encoding automatically:
+`v = chainId * 2 + 35 + recoveryId`. Accepts raw recovery ID (`0`/`1`) or
+legacy form (`27`/`28`). Returns signed `Hex`.
+
+### `broadcastRootstockTx`
+
+<ParamField body="signedTxHex" type="Hex" required>Output of `encodeRootstockSignedTx`.</ParamField>
+<ParamField body="testnet" type="boolean" required>Selects mainnet or testnet.</ParamField>
+<ParamField body="rpcUrl" type="string">Optional RPC override.</ParamField>
+
+Returns `Promise<Hex>` — the transaction hash.
+
+### Full Rootstock example
+
+```typescript
+import {
+  buildRootstockTransfer,
+  prepareRootstockTx,
+  serializeRootstockTx,
+  encodeRootstockSignedTx,
+  broadcastRootstockTx,
+} from "@peelbtc/sdk";
+
+const intent = buildRootstockTransfer(
+  "0xSENDER",
+  "0xRECIPIENT",
+  1_000_000_000_000_000n, // 0.001 RBTC in wei
+  false // mainnet
+);
+
+const prepared = await prepareRootstockTx(intent, false);
+const unsignedHex = serializeRootstockTx(prepared);
+
+// ows sign tx --chain evm --tx <unsignedHex> --json
+const owsSig = { signature: "<hex r||s||v from OWS>" };
+
+const signedHex = encodeRootstockSignedTx(prepared, owsSig);
+const txHash = await broadcastRootstockTx(signedHex, false);
+console.log("explorer: https://explorer.rootstock.io/tx/" + txHash);
+```
+
+---
+
+## Citrea
+
+Citrea uses **EIP-1559 (type 2)** transactions — same pattern as BOB.
+
+### Lifecycle
+
+```
+buildCitreaTransfer(from, to, value, testnet)   →  CitreaTxRequest
+           ↓
+prepareCitreaTx(tx, testnet, rpcUrl?)           →  CitreaTxPrepared
+           ↓
+serializeCitreaTx(tx)                           →  Hex  (0x02... unsigned blob)
+           ↓
+ows sign tx --chain evm --tx <hex>              →  r || s || v
+           ↓
+encodeCitreaSignedTx(tx, sig)                   →  Hex
+           ↓
+broadcastCitreaTx(signedHex, testnet, rpcUrl?)  →  Hex  (tx hash)
+```
+
+### Types
+
+```typescript
+interface CitreaTxRequest {
+  from: Address;
+  to: Address;
+  value: bigint;  // cBTC value in wei
+  data: Hex;
+  chainId: number;
+}
+
+interface CitreaTxPrepared {
+  from: Address;
+  to: Address;
+  value: bigint;
+  data: Hex;
+  chainId: number;
+  nonce: number;
+  gas: bigint;
+  maxFeePerGas: bigint;
+  maxPriorityFeePerGas: bigint;
+  type: "eip1559";
+}
+```
+
+### `buildCitreaTransfer`
+
+<ParamField body="from" type="Address" required>Sender EVM address.</ParamField>
+<ParamField body="to" type="Address" required>Recipient EVM address.</ParamField>
+<ParamField body="value" type="bigint" required>Amount in wei.</ParamField>
+<ParamField body="testnet" type="boolean" required>
+  `true` → citreaTestnet (chainId 5115). `false` → citrea mainnet (chainId 4114).
+</ParamField>
+
+Returns `CitreaTxRequest`.
+
+### `prepareCitreaTx`
+
+<ParamField body="tx" type="CitreaTxRequest" required>Minimal intent.</ParamField>
+<ParamField body="testnet" type="boolean" required>Selects mainnet or testnet RPC.</ParamField>
+<ParamField body="rpcUrl" type="string">Optional RPC override.</ParamField>
+
+Fetches nonce, gas estimate, and EIP-1559 fee data. Returns `CitreaTxPrepared`.
+
+### `serializeCitreaTx`
+
+<ParamField body="tx" type="CitreaTxPrepared" required>Prepared transaction.</ParamField>
+
+Returns unsigned `Hex` (`0x02…` prefix for EIP-1559).
+
+### `encodeCitreaSignedTx`
+
+<ParamField body="tx" type="CitreaTxPrepared" required>The prepared transaction.</ParamField>
+<ParamField body="sig" type="OwsSignResult" required>OWS sign result (65 bytes hex).</ParamField>
+
+Attaches signature. For type-2 transactions, `v` is used as `yParity` (0 or 1).
+Returns signed `Hex`.
+
+### `broadcastCitreaTx`
+
+<ParamField body="signedTxHex" type="Hex" required>Output of `encodeCitreaSignedTx`.</ParamField>
+<ParamField body="testnet" type="boolean" required>Selects mainnet or testnet.</ParamField>
+<ParamField body="rpcUrl" type="string">Optional RPC override.</ParamField>
+
+Returns `Promise<Hex>` — the transaction hash.
+
+### Full Citrea example
+
+```typescript
+import {
+  buildCitreaTransfer,
+  prepareCitreaTx,
+  serializeCitreaTx,
+  encodeCitreaSignedTx,
+  broadcastCitreaTx,
+} from "@peelbtc/sdk";
+
+const intent = buildCitreaTransfer(
+  "0xSENDER",
+  "0xRECIPIENT",
+  1_000_000_000_000_000n, // 0.001 cBTC in wei
+  true // testnet
+);
+
+const prepared = await prepareCitreaTx(intent, true);
+const unsignedHex = serializeCitreaTx(prepared);
+
+// ows sign tx --chain evm --tx <unsignedHex> --json
+const owsSig = { signature: "<hex r||s||v from OWS>" };
+
+const signedHex = encodeCitreaSignedTx(prepared, owsSig);
+const txHash = await broadcastCitreaTx(signedHex, true);
+console.log("explorer: https://explorer.testnet.citrea.xyz/tx/" + txHash);
+```
+
+---
+
+## Stacks
+
+Stacks uses the secp256k1 curve — the same as Bitcoin. Signing uses the OWS
+Bitcoin signer against the raw `preSignSigHash`, not an EVM signer.
+
+### Lifecycle
+
+```
+buildStxTransfer / buildSbtcTransfer          →  StacksTxRequest
+           ↓
+prepareStacksTx(tx, fee?, hiroBaseUrl?)        →  StacksTxPrepared
+           ↓
+ows sign tx --chain bitcoin --tx <preSignSigHash>  →  r || s || v
+           ↓
+encodeStacksSignedTx(prepared, sig)            →  string  (broadcast-ready hex)
+           ↓
+broadcastStacksTx(signedHex, testnet)          →  string  (txid)
+```
+
+### Types
+
+```typescript
+interface StacksTxRequest {
+  type: "stx-transfer" | "sbtc-transfer";
+  from: string;        // Stacks address (SP... mainnet, ST... testnet)
+  to: string;          // Recipient Stacks address
+  amount: bigint;      // microSTX for STX; satoshis for sBTC
+  publicKey: string;   // 33-byte compressed secp256k1 pubkey, hex
+  testnet: boolean;
+  memo?: Uint8Array;   // optional Peel memo bytes (max 34 bytes)
+}
+
+interface StacksTxPrepared {
+  type: "stx-transfer" | "sbtc-transfer";
+  from: string;
+  to: string;
+  amount: bigint;
+  testnet: boolean;
+  nonce: bigint;
+  fee: bigint;           // in microSTX
+  preSignSigHash: string; // 32-byte hex, no 0x prefix — pass to OWS
+  _wire: StacksTransactionWire; // internal
+}
+```
+
+### `buildStxTransfer`
+
+<ParamField body="from" type="string" required>
+  Sender Stacks address (`SP…` mainnet, `ST…` testnet).
+</ParamField>
+<ParamField body="to" type="string" required>
+  Recipient Stacks address.
+</ParamField>
+<ParamField body="amount" type="bigint" required>
+  Amount in **microSTX**. 1 STX = 1,000,000 microSTX.
+</ParamField>
+<ParamField body="publicKey" type="string" required>
+  Sender's 33-byte compressed secp256k1 pubkey, hex-encoded (66 chars, prefix
+  `02` or `03`). Always use the compressed key — see the warning below.
+</ParamField>
+<ParamField body="testnet" type="boolean" required>
+  `true` → testnet (`ST…` addresses). `false` → mainnet (`SP…`).
+</ParamField>
+
+Returns `StacksTxRequest` with `type: "stx-transfer"`.
+
+### `buildSbtcTransfer`
+
+<ParamField body="from" type="string" required>Sender Stacks address.</ParamField>
+<ParamField body="to" type="string" required>Recipient Stacks address.</ParamField>
+<ParamField body="amount" type="bigint" required>
+  Amount in **satoshis** (8 decimal places, same as BTC).
+</ParamField>
+<ParamField body="publicKey" type="string" required>
+  33-byte compressed pubkey hex (66 chars).
+</ParamField>
+<ParamField body="testnet" type="boolean" required>
+  `true` → testnet. `false` → mainnet.
+</ParamField>
+
+Returns `StacksTxRequest` with `type: "sbtc-transfer"`.
+
+### `prepareStacksTx`
+
+<ParamField body="tx" type="StacksTxRequest" required>
+  Transaction intent from a build function.
+</ParamField>
+<ParamField body="fee" type="bigint">
+  Fee in microSTX. Default: `2000n`. Covers typical STX and sBTC transfers.
+</ParamField>
+<ParamField body="hiroBaseUrl" type="string">
+  Override Hiro API base URL. Defaults to `https://api.hiro.so` (mainnet) or
+  `https://api.testnet.hiro.so` (testnet). The function prefers the
+  mempool-aware `possible_next_nonce` endpoint to avoid nonce conflicts.
+</ParamField>
+
+Returns `StacksTxPrepared`. The `preSignSigHash` is a 32-byte hex string
+(no `0x` prefix) — pass it directly to OWS:
+
+```bash
+ows sign tx --chain bitcoin --tx <prepared.preSignSigHash> --json
+# Returns: { signature: "<hex r||s||v>" }
+```
+
+### `encodeStacksSignedTx`
+
+<ParamField body="prepared" type="StacksTxPrepared" required>
+  Prepared transaction from `prepareStacksTx`.
+</ParamField>
+<ParamField body="sig" type="OwsSignResult" required>
+  OWS sign result. `sig.signature` must be 65 bytes hex: `r(32) || s(32) || v(1)`.
+</ParamField>
+
+OWS returns signatures as `r || s || v` (v at end). Stacks expects `v || r || s`
+(v at front). This function converts the format automatically — pass the raw OWS
+signature with no manual reordering. Returns broadcast-ready hex string.
+
+### `broadcastStacksTx`
+
+<ParamField body="signedTxHex" type="string" required>
+  Output of `encodeStacksSignedTx`.
+</ParamField>
+<ParamField body="testnet" type="boolean" required>
+  `true` → testnet. `false` → mainnet.
+</ParamField>
+
+Returns `Promise<string>` — the Stacks txid. Throws if the node returns an error.
+
+### Compressed public key requirement
+
+<Warning>
+  Always pass the **33-byte compressed** secp256k1 public key (66 hex chars,
+  prefix `02` or `03`). Stacks derives addresses from the compressed key.
+  Using the uncompressed key (65 bytes, prefix `04`) will derive a **different**
+  address and cause `NotEnoughFunds` on broadcast even if the wallet is funded.
+
+  The safest source is `ows wallet info --wallet <name> --json` → `publicKey`
+  field, which is always the compressed 33-byte key.
+</Warning>
+
+### Full Stacks example
+
+<CodeGroup>
+
+```typescript STX transfer
+import {
+  buildStxTransfer,
+  prepareStacksTx,
+  encodeStacksSignedTx,
+  broadcastStacksTx,
+} from "@peelbtc/sdk";
+
+const intent = buildStxTransfer(
+  "SP1ABC...",  // sender
+  "SP2DEF...",  // recipient
+  1_000_000n,   // 1 STX in microSTX
+  "0365b706...", // 33-byte compressed pubkey from OWS
+  false          // mainnet
+);
+
+const prepared = await prepareStacksTx(intent, 2000n);
+// prepared.preSignSigHash → 32-byte hex, no 0x prefix
+
+// ows sign tx --chain bitcoin --tx <prepared.preSignSigHash> --json
+const owsSig = { signature: "<hex r||s||v from OWS>" };
+
+const signedHex = encodeStacksSignedTx(prepared, owsSig);
+const txid = await broadcastStacksTx(signedHex, false);
+console.log("explorer: https://explorer.hiro.so/txid/" + txid);
+```
+
+```typescript sBTC transfer (testnet)
+import {
+  buildSbtcTransfer,
+  prepareStacksTx,
+  encodeStacksSignedTx,
+  broadcastStacksTx,
+} from "@peelbtc/sdk";
+
+const intent = buildSbtcTransfer(
+  "ST1...",      // sender (ST... for testnet)
+  "ST2...",      // recipient
+  1n,            // 1 satoshi of sBTC
+  "0365b706...", // 33-byte compressed pubkey from OWS
+  true           // testnet
+);
+
+const prepared = await prepareStacksTx(
+  intent,
+  2000n,
+  "https://api.testnet.hiro.so"
+);
+
+// ows sign tx --chain bitcoin --tx <prepared.preSignSigHash> --json
+const owsSig = { signature: "<hex r||s||v from OWS>" };
+
+const signedHex = encodeStacksSignedTx(prepared, owsSig);
+const txid = await broadcastStacksTx(signedHex, true);
+console.log("explorer: https://explorer.hiro.so/txid/" + txid + "?chain=testnet");
+```
+
+</CodeGroup>

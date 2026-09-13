@@ -1,0 +1,310 @@
+---
+title: "Building and Broadcasting Chain Transactions"
+sidebarTitle: "Transactions"
+description: "Build, prepare, sign, and broadcast transactions on BOB, Rootstock, Citrea, and Stacks using Peel's typed per-chain transaction pipelines."
+---
+
+Every Peel-supported chain has a typed transaction pipeline that follows the same lifecycle: build an unsigned intent, prepare it with live on-chain data (nonce, fees), serialize it to a hex blob for the external signer, attach the signature, and broadcast. Signing always happens outside of Peel — the SDK returns unsigned transaction data that you pass to OWS or another key manager.
+
+The general pattern is:
+
+```
+build → prepare → serialize → [external sign] → encode → broadcast
+```
+
+All amounts use `bigint` — no floating-point values at any point.
+
+<Tabs>
+
+<Tab title="BOB (EIP-1559)">
+
+BOB uses **EIP-1559 type-2 transactions** with `maxFeePerGas` and `maxPriorityFeePerGas`. The serialized unsigned tx starts with `0x02`.
+
+### Functions
+
+| Function | Description |
+|---|---|
+| `buildBobEthTransfer(from, to, value, testnet)` | Native ETH transfer. `value` in wei. |
+| `buildBobTokenTransfer(from, recipient, tokenContract, amount, testnet)` | ERC-20 transfer (e.g. wBTC). `amount` in token's smallest unit. |
+| `prepareBobTx(tx, testnet, rpcUrl?)` | Fetches live nonce + EIP-1559 fee data. Must be called immediately before signing. |
+| `serializeBobTx(tx)` | RLP-encodes the unsigned tx. Returns `0x02...` hex. |
+| `encodeBobSignedTx(tx, sig)` | Attaches the OWS signature to the prepared tx. |
+| `broadcastBobTx(signedTxHex, testnet, rpcUrl?)` | Submits via `eth_sendRawTransaction`. Returns the tx hash. |
+
+- `testnet: true` → BOB Sepolia (chainId 808813), `false` → BOB mainnet (chainId 60808)
+- `sig.signature` must be 65-byte hex: `r(32) || s(32) || v(1)`. Accepts raw `0`/`1` or legacy `27`/`28` — viem normalises both to `yParity` for type-2 serialisation.
+
+### wBTC contract addresses
+
+```
+wBTC mainnet (BOB 60808):  0x0555E30da8f98308EdB960aa94C0Db47230d2B9c
+```
+
+### Full example — wBTC transfer
+
+```ts
+import {
+  buildBobTokenTransfer,
+  prepareBobTx,
+  serializeBobTx,
+  encodeBobSignedTx,
+  broadcastBobTx,
+} from "@peelbtc/sdk";
+
+const WBTC_MAINNET = "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c";
+
+// 1. Build the unsigned intent
+const intent = buildBobTokenTransfer(
+  "0xSENDER",
+  "0xRECIPIENT",
+  WBTC_MAINNET,
+  100n,   // 100 sats worth of wBTC (8 decimals)
+  false,  // mainnet
+);
+
+// 2. Prepare with live nonce + EIP-1559 fees
+const prepared = await prepareBobTx(intent, false);
+
+// 3. Serialize to unsigned 0x02... hex
+const unsignedHex = serializeBobTx(prepared);
+
+// 4. Sign externally with OWS:
+//    ows sign tx --chain evm --tx <unsignedHex> --json
+//    → { signature: "<hex r||s||v>" }
+const owsSig = { signature: "<hex r||s||v from OWS>" };
+
+// 5. Attach signature
+const signedHex = encodeBobSignedTx(prepared, owsSig);
+
+// 6. Broadcast
+const txHash = await broadcastBobTx(signedHex, false);
+console.log("tx hash:", txHash);
+console.log("explorer: https://explorer.gobob.xyz/tx/" + txHash);
+```
+
+### Native ETH transfer
+
+```ts
+import { buildBobEthTransfer, prepareBobTx, serializeBobTx, encodeBobSignedTx, broadcastBobTx } from "@peelbtc/sdk";
+
+const intent = buildBobEthTransfer(
+  "0xSENDER",
+  "0xRECIPIENT",
+  1_000_000_000_000_000n, // 0.001 ETH in wei
+  false,                  // mainnet
+);
+
+const prepared = await prepareBobTx(intent, false);
+const unsignedHex = serializeBobTx(prepared);
+// ows sign tx --chain evm --tx <unsignedHex> --json
+const signedHex = encodeBobSignedTx(prepared, { signature: "<hex r||s||v>" });
+const txHash = await broadcastBobTx(signedHex, false);
+```
+
+</Tab>
+
+<Tab title="Rootstock (Legacy)">
+
+Rootstock uses **legacy type-0 EVM transactions** — no EIP-1559. It uses `gasPrice` instead of `maxFeePerGas`. The serialized unsigned tx does **not** start with `0x02`.
+
+### Functions
+
+| Function | Description |
+|---|---|
+| `buildRootstockTransfer(from, to, value, testnet)` | RBTC native transfer. `value` in wei. `testnet=true` → chainId 31, `false` → chainId 30. |
+| `prepareRootstockTx(tx, testnet, rpcUrl?)` | Fetches live nonce + `gasPrice` (not EIP-1559 fees). |
+| `serializeRootstockTx(tx)` | Produces legacy hex. Will **not** start with `0x02`. |
+| `encodeRootstockSignedTx(tx, sig)` | Attaches signature. Applies EIP-155 `v` encoding automatically (`chainId * 2 + 35 + recoveryId`). |
+| `broadcastRootstockTx(signedTxHex, testnet, rpcUrl?)` | Submits via `eth_sendRawTransaction`. Returns tx hash. |
+
+`encodeRootstockSignedTx` handles EIP-155 `v` conversion internally — pass the raw OWS signature as-is. Accepts `v` as `0`/`1` (OWS) or `27`/`28` (viem).
+
+### Full example
+
+```ts
+import {
+  buildRootstockTransfer, prepareRootstockTx,
+  serializeRootstockTx, encodeRootstockSignedTx, broadcastRootstockTx,
+} from "@peelbtc/sdk";
+
+// 1. Build the unsigned intent (testnet)
+const intent = buildRootstockTransfer(
+  "0xSENDER",
+  "0xRECIPIENT",
+  1_000_000_000_000_000n, // value in wei
+  true,                   // testnet (chainId 31)
+);
+
+// 2. Prepare with live nonce + gasPrice
+const prepared = await prepareRootstockTx(intent, true);
+
+// 3. Serialize to unsigned legacy hex (no 0x02 prefix)
+const unsignedHex = serializeRootstockTx(prepared);
+
+// 4. Sign externally with OWS:
+//    ows sign tx --chain evm --tx <unsignedHex> --json
+//    → { signature: "<hex r||s||v>" }
+const owsSig = { signature: "<hex r||s||v from OWS>" };
+
+// 5. Attach signature (EIP-155 v applied automatically)
+const signedHex = encodeRootstockSignedTx(prepared, owsSig);
+
+// 6. Broadcast
+const txHash = await broadcastRootstockTx(signedHex, true);
+console.log("explorer: https://explorer.testnet.rsk.co/tx/" + txHash);
+```
+
+<Warning>
+  Use `ows sign tx --chain evm`, **not** `ows sign send-tx`. The `send-tx` path expects a typed transaction (`0x01`/`0x02` prefix) and rejects the legacy hex that Rootstock uses. Using the wrong command will cause the signing step to fail.
+</Warning>
+
+</Tab>
+
+<Tab title="Citrea (EIP-1559)">
+
+Citrea uses **EIP-1559 type-2 transactions**, identical in structure to BOB. The serialized unsigned tx starts with `0x02`.
+
+### Functions
+
+| Function | Description |
+|---|---|
+| `buildCitreaTransfer(from, to, value, testnet)` | cBTC native transfer. `value` in wei. `testnet=true` → chainId 5115, `false` → chainId 4114. |
+| `prepareCitreaTx(tx, testnet, rpcUrl?)` | Fetches live nonce + EIP-1559 fee data. |
+| `serializeCitreaTx(tx)` | Produces `0x02...` hex for the signer. |
+| `encodeCitreaSignedTx(tx, sig)` | Attaches the OWS signature. `v` is `yParity` (0 or 1) for type-2 txs. |
+| `broadcastCitreaTx(signedTxHex, testnet, rpcUrl?)` | Submits via `eth_sendRawTransaction`. Returns tx hash. |
+
+### Full example
+
+```ts
+import {
+  buildCitreaTransfer, prepareCitreaTx,
+  serializeCitreaTx, encodeCitreaSignedTx, broadcastCitreaTx,
+} from "@peelbtc/sdk";
+
+// 1. Build the unsigned intent (testnet)
+const intent = buildCitreaTransfer(
+  "0xSENDER",
+  "0xRECIPIENT",
+  1n,   // 1 wei (use real amount for mainnet)
+  true, // testnet (chainId 5115)
+);
+
+// 2. Prepare with live nonce + EIP-1559 fees
+const prepared = await prepareCitreaTx(intent, true);
+
+// 3. Serialize to unsigned 0x02... hex
+const unsignedHex = serializeCitreaTx(prepared);
+
+// 4. Sign externally with OWS:
+//    ows sign tx --chain evm --tx <unsignedHex> --json
+//    → { signature: "<hex r||s||v>" }
+const owsSig = { signature: "<hex r||s||v from OWS>" };
+
+// 5. Attach signature
+const signedHex = encodeCitreaSignedTx(prepared, owsSig);
+
+// 6. Broadcast
+const txHash = await broadcastCitreaTx(signedHex, true);
+console.log("explorer: https://explorer.testnet.citrea.xyz/tx/" + txHash);
+```
+
+<Tip>
+  Need testnet cBTC? Use the Citrea testnet faucet: [faucet.testnet.citrea.xyz](https://faucet.testnet.citrea.xyz)
+</Tip>
+
+</Tab>
+
+<Tab title="Stacks (secp256k1)">
+
+Stacks uses **secp256k1** — the same elliptic curve as Bitcoin. Signing uses the OWS Bitcoin signer, not the EVM signer. Stacks transactions are signed with `ows sign tx --chain bitcoin`.
+
+### Functions
+
+| Function | Description |
+|---|---|
+| `buildStxTransfer(from, to, amount, publicKey, testnet)` | Native STX transfer. `amount` in **microSTX** (1 STX = 1,000,000 microSTX). |
+| `buildSbtcTransfer(from, to, amount, publicKey, testnet)` | sBTC SIP-010 token transfer. `amount` in **satoshis**. |
+| `prepareStacksTx(tx, fee?, hiroBaseUrl?)` | Fetches nonce from Hiro API. Returns `preSignSigHash` for signing. Default fee: 2000 microSTX. |
+| `encodeStacksSignedTx(prepared, sig)` | Converts OWS `r\|\|s\|\|v` to Stacks `v\|\|r\|\|s` format automatically. |
+| `broadcastStacksTx(signedTxHex, testnet)` | Broadcasts to the Stacks node. Returns txid. |
+
+### Full example — sBTC transfer
+
+```ts
+import {
+  buildSbtcTransfer, prepareStacksTx,
+  encodeStacksSignedTx, broadcastStacksTx,
+} from "@peelbtc/sdk";
+
+// 1. Build the unsigned sBTC transfer intent
+const intent = buildSbtcTransfer(
+  "ST1SENDER...",    // sender (ST... for testnet, SP... for mainnet)
+  "ST1RECIPIENT...", // recipient
+  1n,               // 1 satoshi of sBTC
+  "0365b706...",    // 33-byte compressed pubkey from OWS (66 hex chars, 02/03 prefix)
+  true,             // testnet
+);
+
+// 2. Prepare — fetches nonce, produces preSignSigHash
+const prepared = await prepareStacksTx(intent, 2000n, "https://api.testnet.hiro.so");
+// prepared.preSignSigHash → 32-byte hex hash to pass to OWS
+
+// 3. Sign externally with OWS (Bitcoin signer — same secp256k1 curve):
+//    ows sign tx --chain bitcoin --tx <prepared.preSignSigHash> --json
+//    → { signature: "<hex r||s||v>" }
+const owsSig = { signature: "<hex r||s||v from OWS>" };
+
+// 4. Encode (OWS r||s||v → Stacks v||r||s conversion is automatic)
+const signedHex = encodeStacksSignedTx(prepared, owsSig);
+
+// 5. Broadcast
+const txid = await broadcastStacksTx(signedHex, true);
+console.log("explorer: https://explorer.hiro.so/txid/" + txid + "?chain=testnet");
+```
+
+### STX transfer example
+
+```ts
+import { buildStxTransfer, prepareStacksTx, encodeStacksSignedTx, broadcastStacksTx } from "@peelbtc/sdk";
+
+const intent = buildStxTransfer(
+  "ST1SENDER...",
+  "ST1RECIPIENT...",
+  1_000_000n,     // 1 STX = 1,000,000 microSTX
+  "0365b706...",  // 33-byte compressed pubkey
+  true,           // testnet
+);
+
+const prepared = await prepareStacksTx(intent);
+// ows sign tx --chain bitcoin --tx <prepared.preSignSigHash> --json
+const signedHex = encodeStacksSignedTx(prepared, owsSig);
+const txid = await broadcastStacksTx(signedHex, true);
+```
+
+<Warning>
+  Always pass a **33-byte compressed public key** (66 hex chars, starting with `02` or `03`) to `buildStxTransfer` and `buildSbtcTransfer`. Stacks derives addresses from the compressed key. Passing an uncompressed key (65 bytes, `04` prefix) derives a completely different address — the transaction will broadcast to the wrong address or fail with `NotEnoughFunds` even if the wallet is funded. The correct key is the `publicKey` field from `ows wallet info --json`.
+</Warning>
+
+<Warning>
+  Use `ows sign tx --chain bitcoin --tx <preSignSigHash>`, **not** `ows sign send-tx` and **not** `ows sign message`. The `preSignSigHash` is a raw 32-byte hash that must be signed without re-hashing. `sign message` re-hashes the payload and produces an incompatible signature. `sign send-tx` is for broadcasting, not raw signing. `encodeStacksSignedTx` handles the OWS `r\|\|s\|\|v` → Stacks `v\|\|r\|\|s` format conversion automatically.
+</Warning>
+
+</Tab>
+
+</Tabs>
+
+## Transaction lifecycle summary
+
+All four chains share the same conceptual pipeline, with differences only in the serialization format and signing curve:
+
+| Chain | Tx type | Serialized prefix | Signing curve | OWS command |
+|---|---|---|---|---|
+| BOB | EIP-1559 (type 2) | `0x02...` | secp256k1 (EVM) | `ows sign tx --chain evm` |
+| Rootstock | Legacy (type 0) | No prefix | secp256k1 (EVM) | `ows sign tx --chain evm` |
+| Citrea | EIP-1559 (type 2) | `0x02...` | secp256k1 (EVM) | `ows sign tx --chain evm` |
+| Stacks | Stacks native | — | secp256k1 (Bitcoin) | `ows sign tx --chain bitcoin` |
+
+<Note>
+  All `prepare*` functions fetch live nonce and fee data from the network. Call them immediately before signing — stale nonce or fee values can cause transactions to fail. Do not cache the result of a `prepare*` call across multiple signing attempts.
+</Note>

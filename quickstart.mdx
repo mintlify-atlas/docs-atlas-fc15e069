@@ -1,47 +1,206 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Up and Running with Peel in Under Five Minutes"
+sidebarTitle: "Quickstart"
+description: "Install the Peel SDK, connect an external signer, build a BRID identity map, and route your first cross-chain Bitcoin payment — end to end."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+This guide walks you through every step from a fresh environment to a working `routePayment()` call. You will install the SDK, set up an external signer, establish your BRID identity, and route a payment across Bitcoin layers. The entire flow takes about five minutes.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+<Note>
+  Peel never holds private keys. All signing is performed by an external signer tool. The SDK receives unsigned transaction data, passes it to your signer, and receives a signature back — your keys never enter the SDK.
+</Note>
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+### Install @peelbtc/sdk
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+Install the SDK with your preferred package manager. `@peelbtc/core` and `@peelbtc/types` are installed automatically as dependencies.
 
-    ```bash
-    your-cli start
-    ```
-  </Step>
-</Steps>
+<CodeGroup>
+```bash npm
+npm install @peelbtc/sdk@alpha
+```
+
+```bash pnpm
+pnpm add @peelbtc/sdk@alpha
+```
+
+```bash yarn
+yarn add @peelbtc/sdk@alpha
+```
+</CodeGroup>
+
+All Peel packages are ESM modules. Make sure your project is configured for ESM — either set `"type": "module"` in `package.json`, or run Node.js scripts with `--input-type=module`. Node.js 18 or later is required.
+
+### Install Open Wallet Standard (OWS)
+
+Peel requires an external signer. The recommended signer is **Open Wallet Standard (OWS)**, a key management tool that exposes a 33-byte compressed secp256k1 public key and signs transactions without ever exposing your private key.
+
+```bash
+curl -fsSL https://docs.openwallet.sh/install.sh | bash
+```
+
+OWS fulfills the full `SignerAdapter` contract that Peel expects:
+
+- Exposes your **33-byte compressed secp256k1 public key** (hex, no `0x` prefix)
+- Signs raw transactions with `--chain bitcoin` (for Stacks and Bitcoin) or `--chain evm` (for BOB, Rootstock, Citrea)
+- Returns a **65-byte signature** as `r(32) || s(32) || v(1)` hex
+
+Any compatible key management tool that meets these three requirements can be used in place of OWS.
+
+### Get Your Bitcoin Address
+
+Retrieve your wallet info from OWS. The `bitcoin` field in the JSON output contains your P2WPKH bech32 address — this is the root of your BRID identity.
+
+```bash
+ows wallet info --wallet <wallet-name> --json
+```
+
+The output will include your Bitcoin address. Copy it for the next step.
+
+```json
+{
+  "bitcoin": "bc1q...",
+  "publicKey": "02..."
+}
+```
+
+### Sign the BRID Identity Proof Message
+
+To establish your cross-chain identity, sign a canonical BRID Identity Proof message using your Bitcoin wallet. Replace `<wallet-name>` and `<address>` with your values from the previous step.
+
+```bash
+ows sign message --wallet "<wallet-name>" --chain bitcoin \
+  --message "BRID Identity Proof:\nBitcoin Address: <address>" --json
+```
+
+OWS returns a JSON object with a `signature` field — a 65-byte hex string in `r(32) || s(32) || recovery_id(1)` layout. Save both the `signature` and `recovery_id` fields.
+
+```json
+{
+  "recovery_id": 0,
+  "signature": "<130-char hex string>"
+}
+```
+
+### Build the BRID Identity Map
+
+Use `buildBridIdentityMap()` from `@peelbtc/core` to derive your full cross-chain identity from the signed message.
+
+<Warning>
+  OWS emits its signature as `r(32) || s(32) || recovery_id(1)` — the recovery byte is at the **end**. The Noble cryptography library (used internally by `@peelbtc/core`) expects `recovery_id(1) || r(32) || s(32)` — the recovery byte at the **start**. You must rotate the bytes before base64-encoding the signature.
+</Warning>
+
+```ts
+import { buildBridIdentityMap } from "@peelbtc/core";
+
+// Values from OWS --json output
+const owsSig = {
+  recovery_id: 0,
+  signature: "<130-char hex from OWS>",
+};
+
+// Rotate: OWS emits r||s||recovery_id, Noble expects recovery_id||r||s
+const sigBytes = Uint8Array.from(
+  owsSig.signature.match(/.{2}/g)!.map((b) => parseInt(b, 16))
+);
+const rotated = new Uint8Array([sigBytes[64], ...sigBytes.subarray(0, 64)]);
+const sigBase64 = btoa(String.fromCharCode(...rotated));
+
+const address = "<your-bitcoin-address>";
+const message = `BRID Identity Proof:\nBitcoin Address: ${address}`;
+
+const identity = buildBridIdentityMap(address, message, sigBase64);
+console.log(JSON.stringify(identity, null, 2));
+```
+
+The returned `identity` object contains your root Bitcoin address, your compressed public key, and a derived address for each supported chain:
+
+```json
+{
+  "root": "bc1q...",
+  "publicKey": "02...",
+  "derived": [
+    { "address": "bc1q...", "layer": "bitcoin",   "namespace": "bip122",  "format": "p2wpkh",   "testnet": false },
+    { "address": "SP...",   "layer": "stacks",    "namespace": "stacks",  "format": "c32check", "testnet": false },
+    { "address": "0x...",   "layer": "bob",       "namespace": "eip155",  "format": "eip55",    "testnet": false },
+    { "address": "0x...",   "layer": "rootstock", "namespace": "eip155",  "format": "eip55",    "testnet": false },
+    { "address": "0x...",   "layer": "citrea",    "namespace": "eip155",  "format": "eip55",    "testnet": false }
+  ]
+}
+```
+
+### Route a Payment
+
+Pass the identity map to `routePayment()` from `@peelbtc/sdk`. Supply the destination address in any supported format — Bitcoin bech32, Stacks c32check, or an EVM `0x...` address. Amounts are always `bigint` satoshis.
+
+```ts
+import { routePayment } from "@peelbtc/sdk";
+import { buildBridIdentityMap } from "@peelbtc/core";
+
+// --- identity setup (from previous step) ---
+const owsSig = {
+  recovery_id: 0,
+  signature: "<130-char hex from OWS>",
+};
+const sigBytes = Uint8Array.from(
+  owsSig.signature.match(/.{2}/g)!.map((b) => parseInt(b, 16))
+);
+const rotated = new Uint8Array([sigBytes[64], ...sigBytes.subarray(0, 64)]);
+const sigBase64 = btoa(String.fromCharCode(...rotated));
+
+const address = "<your-bitcoin-address>";
+const message = `BRID Identity Proof:\nBitcoin Address: ${address}`;
+const identity = buildBridIdentityMap(address, message, sigBase64);
+
+// --- route the payment ---
+const plan = await routePayment({
+  from: identity,
+  to: "SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7", // any chain, any format
+  amountSats: 100_000n,
+});
+
+console.log("Resolved route:", plan.intent);
+console.log("Execution steps:", plan.steps);
+```
+
+`routePayment()` inspects the destination address format to detect the target chain, pings each candidate network for liveness, then scores routes across four dimensions — sender balance (35%), receiver activity (25%), fee rate (25%), and settlement time (15%) — before returning a `RoutePlan`.
+
+### Execute the Steps
+
+`plan.steps[]` is an ordered array of self-contained execution steps. Each step describes one atomic action: send BTC, call a bridge, broadcast a transaction, or notify a bridge API. Nothing has been broadcast yet — you are in full control.
+
+```ts
+for (const step of plan.steps) {
+  console.log(`Step type: ${step.type}`);
+  // Each step carries the data you need to sign and broadcast it.
+  // For transaction steps, pass step.unsignedTx to your signer,
+  // then use the corresponding encode + broadcast helpers from @peelbtc/sdk.
+}
+```
 
 <Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
-
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+  Each step in `plan.steps` is fully typed. TypeScript will narrow `step.type` to the specific step variant (`BtcSendStep`, `EvmTransferStep`, `StacksTransferStep`, `BridgeDepositStep`, etc.) so your IDE shows exactly which fields are available at each stage of the execution plan.
 </Tip>
+
+</Steps>
+
+---
+
+## What Happens Under the Hood
+
+When `routePayment()` receives your intent it runs four phases before returning:
+
+1. **Address resolution** — detects the destination chain from the address format (bech32 → Bitcoin, `SP...` → Stacks, `0x...` → EVM with heuristic chain selection).
+2. **Liveness check** — performs a 5-second RPC ping to each candidate network. Dead or congested networks are excluded before scoring.
+3. **Route scoring** — candidates are scored across sender balance, receiver activity, fee rate, and settlement time. The winning route is selected.
+4. **Plan assembly** — an ordered list of `steps[]` is built, with a Peel memo (`PEEL | version | intentId | userMemo`) embedded in every transaction for future indexing.
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Full installation options including the one-line AI agent installer.
+  </Card>
+  <Card title="Routing Engine" icon="route" href="/concepts/routing-engine">
+    Deep dive into how routes are scored, bridges selected, and memos encoded.
+  </Card>
+</CardGroup>

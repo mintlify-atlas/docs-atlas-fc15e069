@@ -1,0 +1,117 @@
+---
+title: "Peel: Unified Bitcoin Payment Routing for Every Layer"
+sidebarTitle: "Introduction"
+description: "Peel routes Bitcoin payments across L1 and every major L2. Describe an intent — Peel resolves the route and returns an execution plan. You sign externally."
+---
+
+Peel is a Bitcoin payment routing SDK for Bitcoin L1 and all major L2s. It abstracts away address formats, transaction models, bridge protocols, and signing conventions behind a single clean interface. Describe what you want to pay — Peel resolves the route, selects the bridge, checks network health, and returns an ordered execution plan. You sign externally. **Peel never holds keys.**
+
+```ts
+import { routePayment } from "@peelbtc/sdk";
+import { buildBridIdentityMap } from "@peelbtc/core";
+
+const identity = buildBridIdentityMap(address, message, sigBase64);
+
+const plan = await routePayment({
+  from: identity,
+  to: "SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7", // any chain, any format
+  amountSats: 100_000n,
+});
+
+// plan.steps[] — ordered execution steps (send BTC, call bridge, broadcast tx, etc.)
+// plan.intent  — resolved route, fees, timing, Peel memo
+```
+
+## The Three Core Ideas
+
+Peel is built around three concepts that together make cross-chain Bitcoin payments feel as simple as a native transfer.
+
+### 1. Bitcoin-Rooted Identity (BRID)
+
+Every Bitcoin key already encodes a full cross-chain identity. BRID (Bitcoin-Rooted Identity Derivation) derives all layer addresses from a single compressed secp256k1 public key — the same key that backs your Bitcoin P2WPKH address. No chain-specific keys, no separate derivation paths.
+
+```
+pubkey → Bitcoin  (bc1q...)  via hash160 → bech32
+       → Stacks   (SP...)    via hash160 → c32check
+       → EVM      (0x...)    via keccak256 → EIP-55  (shared: BOB, Rootstock, Citrea)
+```
+
+Identity can be established by signing a BRID Identity Proof message with your Bitcoin wallet, or recovered passively from any existing on-chain transaction — no interaction required from the recipient.
+
+### 2. Balance Orchestration
+
+`fetchBalances()` queries BTC-denominated balances across all supported layers in a single call. Each layer is queried in parallel; failures on individual chains never block the others. Every amount is expressed in satoshis as a `bigint` — no floating point, no unit confusion.
+
+### 3. Payment Routing
+
+`routePayment()` resolves the optimal route from a payment intent. It detects the destination chain from the address format, checks network liveness, scores candidate routes across four dimensions, selects and bridges, and returns a typed `RoutePlan` with ordered `steps[]` ready for signing and broadcast.
+
+---
+
+## Package Hierarchy
+
+Peel is a monorepo of four packages with a strict dependency order. Each package only imports from packages below it.
+
+```
+@peelbtc/types   ← shared interfaces, zero logic
+      ↑
+@peelbtc/core    ← pure crypto: address derivation, BRID identity, recipient recovery
+      ↑
+@peelbtc/sdk     ← balances, transactions, bridges, routing engine
+      ↑
+@peelbtc/mcp     ← MCP server for AI agent integration (v2)
+```
+
+| Package | Version | Description |
+|---|---|---|
+| `@peelbtc/types` | `0.1.0-alpha.2` | Shared interfaces and enums — zero logic, zero dependencies |
+| `@peelbtc/core` | `0.1.0-alpha.2` | Address derivation, BRID identity, on-chain recipient recovery |
+| `@peelbtc/sdk` | `0.1.0-alpha.2` | Routing engine, balance orchestration, transactions, bridges |
+| `@peelbtc/mcp` | planned | MCP server for AI agent payment routing |
+
+Installing `@peelbtc/sdk` automatically installs `@peelbtc/core` and `@peelbtc/types` as dependencies.
+
+---
+
+## Design Principles
+
+**No private keys.** The `SignerAdapter` boundary is a hard security guarantee. Peel returns unsigned transaction data; your signer (OWS, MetaMask, Ledger, etc.) handles all key operations. The SDK never sees a private key.
+
+**Bigint amounts.** All satoshi values throughout the SDK are typed as `bigint`. There is no floating-point arithmetic in the payment path.
+
+**Agent-first.** Every function returns data the agent or developer acts on. Nothing executes without explicit instruction. `routePayment()` returns a plan — broadcasting each step requires a separate, deliberate call.
+
+**Bitcoin-native identity.** One secp256k1 key gives you a valid address on every supported chain. No chain-specific derivation, no separate wallets to manage.
+
+---
+
+## Supported Networks
+
+| Network | Type | Address Format | BTC Asset |
+|---|---|---|---|
+| Bitcoin L1 | L1 | bech32 P2WPKH | BTC |
+| Stacks | L2 | c32check | sBTC |
+| BOB | L2 EVM | EIP-55 | ETH + wBTC |
+| Rootstock | L2 EVM | EIP-55 | RBTC |
+| Citrea | L2 EVM | EIP-55 | cBTC |
+
+EVM L2 addresses (BOB, Rootstock, Citrea) are always identical for a given public key — they share the same keccak256 derivation rule and are listed separately to make chain context explicit.
+
+---
+
+## Where to Go Next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Go from zero to a working `routePayment()` call in five minutes.
+  </Card>
+  <Card title="BRID Identity" icon="fingerprint" href="/concepts/brid-identity">
+    How Peel derives all layer addresses from a single Bitcoin key.
+  </Card>
+  <Card title="Routing Engine" icon="route" href="/concepts/routing-engine">
+    How `routePayment()` scores routes, checks liveness, and selects bridges.
+  </Card>
+  <Card title="Supported Networks" icon="globe" href="/concepts/supported-networks">
+    Chain registry, asset types, bridge protocols, and settlement times.
+  </Card>
+</CardGroup>

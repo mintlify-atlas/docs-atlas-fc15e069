@@ -1,0 +1,259 @@
+---
+title: "How the Peel Routing Engine Works"
+sidebarTitle: "Routing Engine"
+description: "A deep dive into routePayment(): the 10-phase resolution pipeline, candidate scoring, liveness checks, and every RouteStep type it can produce."
+---
+
+`routePayment()` is the core abstraction in Peel. You describe a payment intent — who is paying, where the funds should end up, and how many sats — and the engine resolves the optimal route, checks network health, scores all candidates, and returns a fully structured execution plan. It is a **pure planning function**: it never moves funds, signs transactions, or broadcasts anything. All execution is left to the caller.
+
+## The `RouteIntent` input
+
+Every call to `routePayment` starts with a `RouteIntent` object:
+
+```typescript
+import { routePayment, type RouteIntent } from "@peelbtc/sdk";
+
+const plan = await routePayment({
+  // Required
+  from: identity,          // BridIdentityMap — source wallet with all layer addresses
+  to: "SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7", // destination (any format)
+  amountSats: 100_000n,    // amount in satoshis (bigint — no floating point)
+
+  // EVM disambiguation (required when `to` is 0x... and you want a specific chain)
+  destinationChain: "rootstock",  // "bob" | "rootstock" | "citrea"
+
+  // Constraints
+  preferredBridge: "flyover",     // override bridge selection
+  maxBridgeFeeSats: 10_000n,      // reject any bridge route costing more
+  maxTimeSecs: 3600,              // reject any route taking longer (seconds)
+
+  // Human-readable memo embedded in the tx (max 13 bytes UTF-8)
+  memo: "invoice #42",
+
+  // Score weight overrides (relative values — normalised internally)
+  scoreWeights: {
+    senderBalance:    35,
+    receiverActivity: 25,
+    feeRate:          25,
+    settlementTime:   15,
+  },
+
+  // Opt-in telemetry hook — called after scoring, before return
+  onIntentResolved: async (intent) => {
+    console.log("route:", intent.route, intent.bridge ?? "direct");
+    console.log("fee:", intent.estimatedFeeSats, "sats");
+  },
+});
+```
+
+## The resolution pipeline
+
+`routePayment` runs these phases on every call. Phases that are independent execute in parallel.
+
+<Steps>
+  <Step title="Resolve destination + fetch sender balances (parallel)">
+    The engine parses `to` to determine which address format it matches (Bitcoin bech32, Stacks c32check, or EVM `0x...`). At the same time, it fetches the sender's current BTC-denominated balances across all layers using the addresses in `from.derived`. Both operations happen in parallel.
+  </Step>
+  <Step title="Build candidate routes">
+    From the sender's holdings, the engine enumerates every viable `(sourceLayer, destinationLayer, bridge)` triple. A candidate is viable if the sender holds a nonzero BTC-pegged balance on the source layer and a known route exists to the destination. See [supported routes](#supported-routes) below.
+  </Step>
+  <Step title="Collect all chains in play">
+    Every chain that appears in any candidate — whether source or destination — is collected into a set for the next three parallel phases.
+  </Step>
+  <Step title="Liveness checks, fee estimates, receiver heuristic (parallel)">
+    Three independent checks run at the same time:
+
+    - **Liveness** — each chain in play receives a lightweight RPC ping with a 5-second timeout. A chain that times out or errors is marked `alive: false`.
+    - **Fee estimates** — live gas prices and fee rates are fetched from each chain's API.
+    - **Receiver heuristic** — for `0x...` EVM destinations without an explicit `destinationChain`, the engine checks the recipient's BTC-pegged balances on BOB, Rootstock, and Citrea to infer which chain they use most.
+  </Step>
+  <Step title="Apply live fee estimates to candidates">
+    Each candidate's `estimatedFeeSats` and `estimatedTimeSecs` are updated with the data fetched in the previous phase. Candidates on chains that did not return fee data fall back to static defaults.
+  </Step>
+  <Step title="Eliminate dead-chain candidates">
+    Any candidate whose source or destination chain failed the liveness check is removed from the set entirely. The engine never routes to a chain it cannot confirm is reachable.
+  </Step>
+  <Step title="Apply destinationChain override for EVM disambiguation">
+    If the caller provided `destinationChain`, all EVM candidates that do not match are eliminated. If the receiver heuristic was used instead, the preferred EVM chain is surfaced as a tiebreaker during scoring.
+  </Step>
+  <Step title="Score and rank candidates">
+    The surviving candidates are scored 0–100 using four weighted signals and sorted highest-first. See [scoring](#scoring) below.
+  </Step>
+  <Step title="Encode Peel memo">
+    A UUID `intentId` is generated for this routing decision. The Peel memo (`PEEL | version | intentId | userMemo`) is encoded and attached to the winning route. The same `intentId` is embedded in every transaction step, linking all on-chain activity back to this single routing decision.
+  </Step>
+  <Step title="Build ordered execution steps">
+    The winning candidate is translated into an ordered `RouteStep[]` list. Each step is self-contained — it has every field the agent needs to act. See [execution steps](#execution-steps) below.
+  </Step>
+</Steps>
+
+## Supported routes
+
+<Note>
+  `routePayment` supports direct transfers on any single chain, three bridge routes from Bitcoin L1, and sBTC peg-out from Stacks. L2-to-L2 routing and a programmable Citrea peg-in bridge are planned for a future release.
+</Note>
+
+| Source | Destination | Route type | Bridge |
+|---|---|---|---|
+| Any chain | Same chain | Direct transfer | None |
+| Bitcoin L1 | Stacks | Bridge | sBTC peg-in |
+| Bitcoin L1 | Rootstock | Bridge | Flyover peg-in |
+| Bitcoin L1 | BOB | Bridge | BOB Gateway |
+| Stacks | Bitcoin L1 | Bridge | sBTC peg-out |
+| Any L2 | Different L2 | ❌ Not supported (v1) | — |
+| Bitcoin L1 | Citrea | ❌ No programmatic bridge | — |
+
+Citrea is supported as a **direct transfer destination** when the sender already holds cBTC on Citrea, but there is currently no programmatic bridge route from Bitcoin L1 to Citrea.
+
+## Scoring
+
+Every surviving candidate is scored from 0 to 100 using four weighted signals. Scores are normalised within the candidate set — they are always relative to each other.
+
+<Note>
+  Hard filters run before scoring. Candidates on dead chains, candidates violating `maxBridgeFeeSats`, and candidates violating `maxTimeSecs` are eliminated entirely before scoring begins.
+</Note>
+
+| Signal | Default weight | Logic |
+|---|---|---|
+| `senderBalance` | **35** | Sender's balance on source chain ÷ total sender BTC sats. Prefer routes that spend the most liquid asset, minimising unnecessary bridging. |
+| `receiverActivity` | **25** | Receiver's BTC balance on destination chain ÷ total receiver BTC. Prefer the chain the receiver uses most — funds are useful there. |
+| `feeRate` | **25** | Inverted, normalised within the candidate set. Lower total fee = higher score. |
+| `settlementTime` | **15** | Inverted, normalised within candidate set. Faster settlement = higher score. |
+
+The composite score formula:
+
+```
+score = (
+  senderScore    × weights.senderBalance   +
+  receiverScore  × weights.receiverActivity +
+  feeScore       × weights.feeRate          +
+  timeScore      × weights.settlementTime
+) / totalWeight
+```
+
+Weights are relative — they do not need to sum to 100. Override them via `scoreWeights` in the intent.
+
+**Tie-breaking:** when `preferredBridge` is set, that bridge's route is always picked from the top-scored candidates regardless of exact score order. When `destinationChain` is set for an EVM address, only candidates targeting that chain survive to scoring.
+
+## Execution steps
+
+After `routePayment` returns, the agent executes `plan.steps` in order. All step types are exported from `@peelbtc/sdk`.
+
+<Accordion title="btc-send — Bitcoin UTXO transaction">
+  Agent builds, signs, and broadcasts a Bitcoin transaction. The `peelMemo` must be added as a zero-value `OP_RETURN` output.
+
+  ```typescript
+  interface BtcSendStep {
+    type: "btc-send";
+    from: string;          // bc1q... sender address
+    to: string;            // bc1q... recipient address
+    amountSats: bigint;
+    peelMemo: EncodedMemo; // add as OP_RETURN output (0 sats)
+  }
+  ```
+</Accordion>
+
+<Accordion title="evm-transfer — EVM native or ERC-20 transfer">
+  Agent calls the chain-specific prepare function, signs with OWS, encodes, and broadcasts. For native transfers (`ETH`, `RBTC`, `cBTC`), embed `peelMemo` in the transaction `data` field. For ERC-20 transfers, `peelMemo` is omitted because calldata is occupied by the contract call.
+
+  ```typescript
+  interface EvmTransferStep {
+    type: "evm-transfer";
+    chain: "bob" | "rootstock" | "citrea";
+    from: string;
+    to: string;
+    amountWei: bigint;
+    asset: "ETH" | "RBTC" | "cBTC" | "wBTC";
+    tokenContract?: string;  // present for ERC-20 transfers
+    peelMemo?: EncodedMemo;  // embed in tx data field (native only)
+  }
+  ```
+</Accordion>
+
+<Accordion title="stacks-transfer — STX or sBTC transfer">
+  Agent uses the Stacks transaction pipeline. STX native transfers support a `memo` field that holds the Peel memo. sBTC SIP-010 transfers also accept an optional memo buffer parameter.
+
+  ```typescript
+  interface StacksTransferStep {
+    type: "stacks-transfer";
+    from: string;       // SP... sender
+    to: string;         // SP... recipient
+    publicKey: string;  // 33-byte compressed pubkey (hex)
+    asset: "STX" | "sBTC";
+    amountSats: bigint;
+    peelMemo?: EncodedMemo; // in Stacks memo field for STX; sBTC uses SIP-010 memo param
+  }
+  ```
+</Accordion>
+
+<Accordion title="bridge-deposit — Bridge peg-in">
+  Agent calls the bridge-specific setup function to obtain a deposit address, then sends BTC there (including `peelMemo` as `OP_RETURN`). The `params` field contains everything the bridge adapter needs.
+
+  ```typescript
+  interface BridgeDepositStep {
+    type: "bridge-deposit";
+    bridge: "sbtc" | "flyover" | "bob-gateway";
+    from: string;              // bc1q... sender
+    amountSats: bigint;
+    estimatedFeeSats: bigint;
+    estimatedTimeSecs: number;
+    params: SbtcDepositParams | FlyoverDepositParams | BobGatewayParams;
+    peelMemo: EncodedMemo;
+  }
+  ```
+</Accordion>
+
+<Accordion title="bridge-notify — sBTC deposit notification">
+  sBTC peg-in only. After broadcasting the BTC deposit transaction, fetch the raw tx hex from mempool.space and call `notifySbtcDeposit`. This is always the step immediately following a `bridge-deposit` with `bridge: "sbtc"`.
+
+  ```typescript
+  interface BridgeNotifyStep {
+    type: "bridge-notify";
+    bridge: "sbtc";
+  }
+  ```
+</Accordion>
+
+<Accordion title="sbtc-withdrawal — sBTC peg-out (Stacks → Bitcoin)">
+  Agent calls `prepareSbtcWithdrawalTx`, signs with OWS, and broadcasts to Stacks. The sBTC signers send BTC to `btcRecipient` after the Stacks transaction confirms.
+
+  ```typescript
+  interface SbtcWithdrawalStep {
+    type: "sbtc-withdrawal";
+    from: string;        // SP... Stacks address
+    publicKey: string;   // 33-byte compressed pubkey
+    btcRecipient: string; // bc1q... Bitcoin recipient
+    amountSats: bigint;
+    maxFeeSats: bigint;  // sBTC signer fee cap
+  }
+  ```
+</Accordion>
+
+## The `RoutePlan` output
+
+`routePayment` returns a `RoutePlan`:
+
+```typescript
+interface RoutePlan {
+  intent: ResolvedIntent; // full routing decision with scores, fees, timing, liveness
+  steps: RouteStep[];     // ordered execution plan
+}
+
+interface ResolvedIntent {
+  id: string;              // UUID — embedded in every Peel memo for this plan
+  resolvedAt: number;      // unix timestamp ms
+  sourceLayer: NetworkLayer;
+  destinationLayer: NetworkLayer;
+  destinationAddress: string;
+  amountSats: bigint;
+  route: "direct" | "bridge";
+  bridge?: BridgeName;
+  estimatedFeeSats: bigint;
+  estimatedTimeSecs: number;
+  networkChecks: NetworkLivenessResult[];  // one per chain checked
+  recipientHint?: RecipientHint;           // EVM receiver heuristic result
+  allCandidates: ScoredCandidate[];        // every scored candidate, for transparency
+}
+```
+
+`plan.intent.allCandidates` exposes the full scoring breakdown for every candidate, enabling agents to surface routing transparency to users.

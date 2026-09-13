@@ -1,0 +1,413 @@
+---
+title: "Bridging BTC Between Bitcoin L1 and L2s"
+sidebarTitle: "Bridges"
+description: "Bridge BTC to and from Stacks (sBTC), Rootstock (Flyover), and BOB (Gateway CLI) using Peel's bridge adapters and helper functions."
+---
+
+Peel supports three bridge protocols for moving BTC between Bitcoin L1 and its L2 representations. Each bridge has a distinct deposit flow, fee model, and settlement time. When you use `routePayment()`, the routing engine selects the right bridge automatically and returns `BridgeDepositStep` instructions — you don't need to call bridge APIs directly. The functions documented here are available if you want to interact with a bridge independently or implement a custom flow.
+
+<Note>
+  When you use `routePayment()`, every bridge peg-in surfaces as a `BridgeDepositStep` in `plan.steps[]`. The step includes the bridge name, amount, and all parameters needed to call the bridge setup function. Developers following the routing engine flow do not need to call bridge APIs directly — the steps guide the full execution.
+</Note>
+
+<Tabs>
+
+<Tab title="sBTC (BTC ↔ Stacks)">
+
+sBTC is the canonical Bitcoin representation on Stacks: a SIP-010 token backed 1:1 by BTC, managed by a decentralised federation of sBTC Signers coordinated via the Emily API.
+
+**Mainnet only.** sBTC testnet bridging is not supported by this module. The testnet sBTC contract is `ST1F7QA2MDF17S807EPA36TSS8AMEFY4KA9TVGWXT.sbtc-token` for display purposes.
+
+**Minimum peg-in and peg-out:** 10,000 sats (0.0001 BTC).
+
+```ts
+import {
+  buildSbtcDepositPlan, notifySbtcDeposit, pollSbtcDepositStatus,
+  prepareSbtcWithdrawalTx, pollSbtcWithdrawalStatus,
+  encodeStacksSignedTx, broadcastStacksTx,
+} from "@peelbtc/sdk";
+```
+
+### Peg-in: BTC → sBTC (~20 minutes)
+
+<Steps>
+
+#### Build the deposit plan
+
+Call `buildSbtcDepositPlan()` to fetch the sBTC Signers' aggregate public key from Emily and construct the P2TR deposit address. The deposit address is a custom Taproot address containing two scripts: a deposit script the Signers use to sweep the UTXO and mint sBTC, and a reclaim script that lets the depositor recover funds after `reclaimLockTime` blocks if the Signers don't act.
+
+```ts
+// Derive reclaimPublicKey from OWS compressed pubkey: strip the 02/03 prefix
+const owsPubKey = "0365b706..."; // from `ows wallet info --json` → publicKey
+const reclaimPublicKey = owsPubKey.slice(2); // → 64 hex chars (32-byte x-only Schnorr key)
+
+const plan = await buildSbtcDepositPlan({
+  amountSats: 100_000n,
+  stacksAddress: "SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7",
+  reclaimPublicKey,            // x-only 32-byte Schnorr key (strip 02/03 from compressed key)
+  reclaimLockTime: 950,        // optional — BTC blocks before reclaim (default: 950, ~1 week)
+  maxSignerFee: 80_000,        // optional — max sats deducted from minted sBTC (default: 80,000)
+});
+
+// plan.depositAddress     → P2TR address to send BTC to
+// plan.amountSats         → exact sats to send
+// plan.maxSignerFee       → max sats Signers may charge for sweeping
+// plan.reclaimLockTime    → BTC blocks until reclaim is possible
+// plan.signersPublicKey   → Signers' aggregate x-only Schnorr pubkey (informational)
+// plan.estimatedMintTimeSecs → ~1200 (20 minutes)
+```
+
+The `reclaimPublicKey` is the depositor's BTC public key with the `02`/`03` compression prefix stripped — the 32-byte x-coordinate only (64 hex chars). This key goes into the reclaim tapscript so the depositor can recover funds if the deposit is not processed within `reclaimLockTime` blocks.
+
+#### Send BTC to the deposit address
+
+Use OWS or your Bitcoin signer to construct and broadcast a transaction:
+
+- **Output**: `plan.amountSats` sats to `plan.depositAddress`
+- Include the `peelMemo` as an `OP_RETURN` output (0-value) if routing via `routePayment()`
+- UTXO selection, fee estimation, and signing are handled externally
+
+Save the resulting `txid`.
+
+#### Notify the sBTC Signers
+
+Call `notifySbtcDeposit()` immediately after the BTC transaction appears in the mempool. The Emily API requires the full raw transaction hex.
+
+```ts
+// Fetch raw tx hex from mempool.space
+const txHex = await fetch(`https://mempool.space/api/tx/${txid}/hex`).then(r => r.text());
+
+const response = await notifySbtcDeposit(plan, txHex);
+// response.status: "pending" | "confirmed" | ...
+// response.bitcoinTxid, response.amount, response.parameters
+```
+
+#### Poll until sBTC arrives
+
+```ts
+const status = await pollSbtcDepositStatus(txid);
+// status.status: "pending" | "confirmed" | "failed"
+// status.fulfillment.StacksTxid — Stacks mint tx (when confirmed)
+// status.fulfillment.BitcoinTxid — Signers' sweep tx (when confirmed)
+```
+
+Typical settlement: **~20 minutes** (1–2 BTC confirmations). The Signers deduct their actual fee from the minted sBTC amount (up to `maxSignerFee`).
+
+</Steps>
+
+### Peg-out: sBTC → BTC (~1 hour)
+
+<Steps>
+
+#### Prepare the withdrawal transaction
+
+```ts
+const prepared = await prepareSbtcWithdrawalTx({
+  stacksAddress: "SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7",
+  publicKey: "0365b706...",      // 33-byte compressed pubkey from OWS
+  btcRecipientAddress: "bc1p...", // BTC address to receive withdrawn BTC
+  amountSats: 100_000n,           // sBTC to withdraw, in satoshis
+  maxFeeSats: 3_000n,             // optional — max fee for BTC sweep (default: 3,000n)
+});
+// prepared.preSignSigHash → 32-byte hex, pass to OWS for signing
+```
+
+Supported BTC recipient types: P2TR (`bc1p...`), P2WPKH (`bc1q...`), P2SH (`3...`), P2PKH (`1...`).
+
+The contract call locks `amountSats + maxFeeSats` sBTC. If the actual sweep fee is less than `maxFeeSats`, the difference is refunded as sBTC.
+
+#### Sign and broadcast
+
+```ts
+// ows sign tx --chain bitcoin --tx <prepared.preSignSigHash> --json
+const owsSig = { signature: "<hex r||s||v from OWS>" };
+
+const signedHex = encodeStacksSignedTx(prepared, owsSig);
+const txid = await broadcastStacksTx(signedHex, false); // false = mainnet
+```
+
+#### Poll until BTC arrives
+
+```ts
+const withdrawals = await pollSbtcWithdrawalStatus("SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7");
+// withdrawals[0].status: "pending" | "accepted" | "confirmed" | "failed"
+// withdrawals[0].txid — BTC txid when confirmed
+```
+
+Typical settlement: **~1 hour** (6 BTC confirmations). The BTC txid is not available until after on-chain confirmation.
+
+</Steps>
+
+### Mainnet contracts
+
+| Contract | Address |
+|---|---|
+| `sbtc-token` | `SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token` |
+| `sbtc-withdrawal` | `SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-withdrawal` |
+
+</Tab>
+
+<Tab title="Flyover (BTC ↔ Rootstock)">
+
+Rootstock Flyover is a fast BTC bridge that uses Liquidity Providers (LPs) to advance rBTC funds while the underlying PowPeg settles in the background. Users receive rBTC in 20–60 minutes instead of the ~17 hours the native PowPeg requires.
+
+`RootstockFlyoverBridgeAdapter` wraps `@rsksmart/flyover-sdk` with an agent-first API. It auto-selects captcha-free LPs by default, which is essential for CLI and agent environments.
+
+```ts
+import {
+  RootstockFlyoverBridgeAdapter,
+  FLYOVER_LIMITS,
+  FLYOVER_LBC_ADDRESS,
+} from "@peelbtc/sdk";
+```
+
+### Protocol limits
+
+```ts
+FLYOVER_LIMITS.minPegInSats    // 500_001n  (0.00500001 BTC minimum)
+FLYOVER_LIMITS.maxPegInSats    // 1_500_000_000n  (15 BTC, LP-set)
+FLYOVER_LIMITS.minPegOutWei    // 4_000_000_000_000_000n  (0.004 rBTC)
+FLYOVER_LIMITS.maxPegOutWei    // 15_000_000_000_000_000_000n  (15 rBTC, LP-set)
+```
+
+### LBC contract addresses
+
+```ts
+FLYOVER_LBC_ADDRESS.mainnet  // "0xaa9caf1e3967600578727f975f283446a3da6612"
+FLYOVER_LBC_ADDRESS.testnet  // "0xc2a630c053d12d63d32b025082f6ba268db18300"
+```
+
+### Peg-in: BTC → rBTC (~20–60 minutes)
+
+<Steps>
+
+#### Create the adapter
+
+```ts
+const adapter = new RootstockFlyoverBridgeAdapter({
+  testnet: false,           // true for testnet
+  disableChecksum: true,    // required when using OWS/BRID-derived EIP-55 addresses
+});
+```
+
+`disableChecksum: true` is required because OWS produces standard EIP-55 checksummed addresses, not RSK-checksummed ones. Omitting this will cause address validation errors.
+
+#### Get the payment plan
+
+```ts
+const plan = await adapter.getPegInPaymentPlan(
+  500_001n,                                        // amountSats — must be ≥ FLYOVER_LIMITS.minPegInSats
+  "0x388C818CA8B9251b393131C08a736A67ccB19297",    // RSK recipient address
+);
+
+// plan.depositAddress           → BTC address to send to (unique to this quote)
+// plan.amountSats               → exact sats to send (includes LP fees)
+// plan.deadlineUnix             → Unix timestamp — deposit must confirm before this
+// plan.quoteHash                → tracking ID for pollStatus()
+// plan.requiredBtcConfirmations → confirmations LP waits for before acting
+// plan.fees.callFeeWei          → LP service fee in wei
+// plan.fees.gasFeeWei           → gas fee in wei
+// plan.fees.totalWei            → total in wei (= amountSats × 10^10)
+```
+
+**Save the entire `plan` object.** The `quote`, `lpSignature`, and `bitcoinDepositAddressHash` fields are all required for validation and recovery.
+
+#### Validate and broadcast the BTC transaction
+
+Before broadcasting, validate the signed BTC transaction against the plan:
+
+```ts
+const error = await adapter.validatePegInTransaction(plan, rawBtcTxHex);
+if (error) throw new Error(`invalid peg-in tx: ${error}`);
+// If valid, broadcast via OWS
+```
+
+Save the resulting `txid`.
+
+#### Poll for status
+
+```ts
+const status = await adapter.pollStatus(plan.quoteHash);
+// status.status: "pending" | "confirming" | "minting" | "completed" | "failed"
+// status.sourceTxid     → user's BTC txid (once seen by LP)
+// status.destinationTxid → RSK callForUser or registerPegIn tx hash
+```
+
+Once the LP sees enough confirmations, it calls `callForUser` on the LBC and the recipient receives rBTC on Rootstock.
+
+#### Recovery path (if LP fails)
+
+If `pollStatus` is stuck and the LP has not registered the peg-in automatically:
+
+```ts
+import { Mempool } from "@rsksmart/flyover-sdk";
+
+// Connect to Bitcoin and RSK data sources
+adapter.connectToBitcoin(new Mempool({ network: "mainnet" }));
+await adapter.connectToRsk(rskConnectionWithSigner);
+
+// SDK fetches BTC SPV proof and calls registerPegin on the LBC
+const rskTxHash = await adapter.registerPegIn(plan, txid);
+```
+
+To inspect the parameters without executing (for manual encoding):
+
+```ts
+const info = adapter.getRegisterPegInInfo(plan, txid);
+// info.lbcAddress   → RSK contract to call
+// info.valueRbtc    → 0n (registerPegin is nonpayable)
+// info.quote        → quote object
+// info.lpSignature  → LP commitment signature
+// info.userBtcTxHash → your BTC txid
+```
+
+</Steps>
+
+### Peg-out: rBTC → BTC (~20–60 minutes)
+
+<Steps>
+
+#### Get a peg-out quote
+
+```ts
+const result = await adapter.getPegoutQuote(
+  500_001n,              // amountSats to receive in BTC
+  "bc1q...",             // Bitcoin address to receive BTC
+  "0xRSK_REFUND...",     // RSK address for refund if LP fails
+);
+
+// result.lbcAddress       → LBC contract address — RSK tx recipient
+// result.totalAmountWei   → exact wei to send with the RSK tx
+// result.totalAmountSats  → same amount in satoshis
+// result.quoteHash        → tracking ID for getPegoutStatus()
+// result.signature        → LP commitment signature
+```
+
+#### Deposit rBTC
+
+The `depositPegout` method requires an active RSK signer connection:
+
+```ts
+await adapter.connectToRsk(rskConnectionWithSigner);
+const rskTxHash = await adapter.depositPegout(result.quote, result.signature);
+```
+
+#### Poll for status
+
+```ts
+const status = await adapter.getPegoutStatus(result.quoteHash);
+// status.status: "pending" | "confirming" | "minting" | "completed" | "failed"
+// status.sourceTxid      → user's RSK deposit tx
+// status.destinationTxid → LP's BTC payout tx
+```
+
+</Steps>
+
+</Tab>
+
+<Tab title="BOB Gateway (BTC ↔ BOB)">
+
+BOB Gateway CLI is a cross-chain swap engine for native Bitcoin. It moves BTC to and from EVM chains in a single Bitcoin transaction — non-custodial, no SDK binding, no language lock-in.
+
+### Install
+
+```bash
+npm install -g @gobob/gateway-cli
+gateway-cli --help
+```
+
+### BTC → ETH/wBTC on BOB
+
+Use `gateway-cli swap` with the `--unsigned` flag to get an unsigned transaction for external signing (OWS-compatible):
+
+```bash
+# 1. Get unsigned tx from Gateway (does not broadcast)
+gateway-cli swap \
+  --src BTC \
+  --dst ETH:bob \
+  --amount <sats> \
+  --recipient <bobAddress> \
+  --unsigned \
+  --json
+
+# 2. Sign with OWS (outside the CLI)
+# ows sign tx --chain bitcoin --tx <psbt-hex> --json
+
+# 3. Register the signed tx to complete the order
+gateway-cli register <order-id> <signed-txid>
+```
+
+To swap to wBTC instead of ETH:
+
+```bash
+gateway-cli swap \
+  --src BTC \
+  --dst wBTC:bob \
+  --amount 100000 \
+  --recipient 0xYourBobAddress \
+  --unsigned \
+  --json
+```
+
+### Preview a swap before committing
+
+Always quote before swapping to see real fees, slippage, and receive amounts:
+
+```bash
+gateway-cli quote --src BTC --dst ETH:bob --amount 0.001BTC --json
+# → { "srcAmount": "100000", "dstAmount": "...", "fee": "...", ... }
+```
+
+### wBTC → BTC (bridge out)
+
+```bash
+gateway-cli swap \
+  --src wBTC:bob \
+  --dst BTC \
+  --amount 100000 \
+  --recipient bc1q... \
+  --unsigned \
+  --json
+```
+
+### Amount formats
+
+| Format | Example | Meaning |
+|---|---|---|
+| Token suffix | `0.001BTC` | 0.001 BTC in human units |
+| USD | `100USD` | $100 worth (price oracle) |
+| Atomic | `100000` | 100,000 satoshis / wei (bare numbers are always atomic) |
+| All | `ALL` | Max spendable balance |
+
+### Track order status
+
+```bash
+gateway-cli status <order-id> --json
+# → { "status": "pending" | "confirming" | "completed" | "failed", ... }
+```
+
+### Relationship to Peel SDK
+
+The Gateway CLI handles **bridging** (BTC L1 ↔ BOB). Once BTC is on BOB as ETH or wBTC, use the Peel SDK EVM pipeline for further transfers:
+
+```ts
+import { buildBobTokenTransfer, prepareBobTx, encodeBobSignedTx, broadcastBobTx } from "@peelbtc/sdk";
+
+const WBTC_MAINNET = "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c";
+
+const intent = buildBobTokenTransfer("0xSENDER", "0xRECIPIENT", WBTC_MAINNET, 100n, false);
+const prepared = await prepareBobTx(intent, false);
+// sign with OWS, encode, broadcast
+```
+
+</Tab>
+
+</Tabs>
+
+## Bridge comparison
+
+| Bridge | Route | Min amount | Settlement | Fee model |
+|---|---|---|---|---|
+| sBTC | BTC ↔ sBTC (Stacks) | 10,000 sats | Peg-in: ~20 min / Peg-out: ~1 hour | Up to `maxSignerFee` deducted from minted sBTC |
+| Flyover | BTC ↔ rBTC (Rootstock) | 500,001 sats | 20–60 min | LP fee + gas fee, included in quoted `amountSats` |
+| BOB Gateway | BTC ↔ ETH/wBTC (BOB) | — | Varies | Shown in `gateway-cli quote` output |

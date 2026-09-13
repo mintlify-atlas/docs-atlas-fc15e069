@@ -1,0 +1,274 @@
+---
+title: "Address Derivation from secp256k1 Public Keys"
+sidebarTitle: "Address Derivation"
+description: "Derive Bitcoin P2WPKH, Stacks c32check, and EVM EIP-55 addresses from a single 33-byte compressed secp256k1 public key."
+---
+
+The three address derivation functions in `@peelbtc/core` translate a single 33-byte compressed secp256k1 public key into native addresses for every layer Peel supports. All three functions are pure, synchronous, and dependency-free — they use `@noble/hashes` and `@noble/curves` under the hood and never make network calls. Passing the same key to all three is the foundation of BRID: one keypair, one identity, every chain.
+
+## Input format
+
+Every derivation function accepts a **33-byte compressed secp256k1 public key** as a `Uint8Array`. Compressed keys start with `02` (even Y) or `03` (odd Y) and are the standard output of every secp256k1 library.
+
+```typescript
+// From a hex string
+const pubkeyHex = "0365b706e5e2fd20ecb3a2b40d26eca5036a6fe5e8b29a7c7ba51b33b07b2aa31";
+const pubkey = Uint8Array.from(
+  pubkeyHex.match(/.{2}/g)!.map((b) => parseInt(b, 16))
+);
+
+// pubkey.length === 33  ✓
+```
+
+<Warning>
+All three functions throw `Error` if the input is not exactly 33 bytes. Always validate your key length before calling.
+</Warning>
+
+---
+
+## `deriveBitcoinAddress`
+
+Derives a Bitcoin **P2WPKH** (native SegWit, BIP-84) bech32 address.
+
+**Derivation:** `hash160(pubkey)` → bech32 encode with witness version 0
+- `hash160` = `RIPEMD160(SHA256(pubkey))` → 20-byte witness program
+- Mainnet HRP `bc` → `bc1q...`
+- Testnet HRP `tb` → `tb1q...`
+
+```typescript
+function deriveBitcoinAddress(
+  compressedPubkey: Uint8Array,
+  testnet?: boolean
+): DerivedAddress
+```
+
+### Parameters
+
+<ParamField path="compressedPubkey" type="Uint8Array" required>
+  33-byte compressed secp256k1 public key. Must start with `02` or `03`. Throws if the length is not exactly 33 bytes.
+</ParamField>
+
+<ParamField path="testnet" type="boolean" default="false">
+  When `true`, encodes a testnet address with HRP `tb` (produces `tb1q...`). When `false` (default), encodes a mainnet address with HRP `bc` (produces `bc1q...`).
+</ParamField>
+
+### Return value
+
+<ResponseField name="DerivedAddress" type="object">
+  <Expandable title="DerivedAddress fields">
+    <ResponseField name="address" type="string">
+      Bech32-encoded P2WPKH address. `bc1q...` on mainnet, `tb1q...` on testnet.
+    </ResponseField>
+    <ResponseField name="layer" type="string">
+      Always `"bitcoin"`.
+    </ResponseField>
+    <ResponseField name="namespace" type="string">
+      Always `"bip122"` — the CAIP-2 namespace for Bitcoin.
+    </ResponseField>
+    <ResponseField name="format" type="string">
+      Always `"p2wpkh"`.
+    </ResponseField>
+    <ResponseField name="testnet" type="boolean">
+      Mirrors the `testnet` parameter passed in.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+## `deriveStacksAddress`
+
+Derives a Stacks **c32check** address. Uses the same `hash160` primitive as Bitcoin but encodes in Stacks' base-32 alphabet with a double-SHA256 checksum.
+
+**Derivation:** `hash160(pubkey)` → c32check encode with version byte
+- Mainnet version `22` (0x16) → `SP...`
+- Testnet version `26` (0x1a) → `ST...`
+
+```typescript
+function deriveStacksAddress(
+  compressedPubkey: Uint8Array,
+  testnet?: boolean
+): DerivedAddress
+```
+
+### Parameters
+
+<ParamField path="compressedPubkey" type="Uint8Array" required>
+  33-byte compressed secp256k1 public key. Throws if the length is not exactly 33 bytes.
+</ParamField>
+
+<ParamField path="testnet" type="boolean" default="false">
+  When `true`, uses version byte `26` to produce an `ST...` address. When `false`, uses version byte `22` to produce an `SP...` address.
+</ParamField>
+
+### Return value
+
+<ResponseField name="DerivedAddress" type="object">
+  <Expandable title="DerivedAddress fields">
+    <ResponseField name="address" type="string">
+      c32check-encoded Stacks address. `SP...` on mainnet, `ST...` on testnet.
+    </ResponseField>
+    <ResponseField name="layer" type="string">
+      Always `"stacks"`.
+    </ResponseField>
+    <ResponseField name="namespace" type="string">
+      Always `"stacks"` — the CAIP-2 namespace for Stacks.
+    </ResponseField>
+    <ResponseField name="format" type="string">
+      Always `"c32check"`.
+    </ResponseField>
+    <ResponseField name="testnet" type="boolean">
+      Mirrors the `testnet` parameter passed in.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+The 20-byte `hash160` payload in a Stacks address is identical to the witness program in the Bitcoin P2WPKH address derived from the same key. Only the encoding differs.
+</Note>
+
+---
+
+## `deriveEvmAddress`
+
+Derives an EVM address in **EIP-55 checksum** format. Valid on all EVM-compatible Bitcoin L2s supported by Peel: BOB, Rootstock, and Citrea.
+
+**Derivation:**
+1. Decompress the key → 65-byte uncompressed form (`04 || X || Y`)
+2. Strip the `04` prefix → 64 raw bytes
+3. `keccak256(64 bytes)` → 32 bytes
+4. Take the last 20 bytes → raw address bytes
+5. Hex-encode and apply EIP-55 checksum casing
+
+```typescript
+function deriveEvmAddress(
+  compressedPubkey: Uint8Array,
+  testnet?: boolean
+): DerivedAddress
+```
+
+### Parameters
+
+<ParamField path="compressedPubkey" type="Uint8Array" required>
+  33-byte compressed secp256k1 public key. Throws if the length is not exactly 33 bytes.
+</ParamField>
+
+<ParamField path="testnet" type="boolean" default="false">
+  Carried through to the result's `testnet` field. EVM addresses are the same on mainnet and testnet — this flag provides context only.
+</ParamField>
+
+### Return value
+
+<ResponseField name="DerivedAddress" type="object">
+  <Expandable title="DerivedAddress fields">
+    <ResponseField name="address" type="string">
+      EIP-55 checksummed hex address. Always `0x` followed by 40 mixed-case hex characters.
+    </ResponseField>
+    <ResponseField name="layer" type="string">
+      Always `"evm"`.
+    </ResponseField>
+    <ResponseField name="namespace" type="string">
+      Always `"eip155"` — the CAIP-2 namespace for all EVM chains.
+    </ResponseField>
+    <ResponseField name="format" type="string">
+      Always `"eip55"`.
+    </ResponseField>
+    <ResponseField name="testnet" type="boolean">
+      Mirrors the `testnet` parameter passed in.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+The same EVM address is valid on **BOB, Rootstock, and Citrea** — all three EVM Bitcoin L2s share the same derivation. When building `buildBridIdentityMap`, the EVM address is expanded into three named per-chain entries (one per network) inside the `derived` array. The underlying `0x...` address string is identical across all three.
+</Warning>
+
+---
+
+## `DerivedAddress` interface
+
+All three functions return the same `DerivedAddress` shape, imported from `@peelbtc/types`:
+
+```typescript
+interface DerivedAddress {
+  /** The encoded address string (e.g. "bc1q...", "SP...", "0x...") */
+  address: string;
+
+  /** Human-readable layer identifier, e.g. "bitcoin", "stacks", "evm" */
+  layer: string;
+
+  /** CAIP-2 namespace — identifies which derivation procedure was used */
+  namespace: Caip2Namespace;
+
+  /** Encoding format, e.g. "p2wpkh", "c32check", "eip55" */
+  format: string;
+
+  /** Whether this address is for a testnet */
+  testnet: boolean;
+}
+```
+
+---
+
+## Complete example
+
+The following derives all addresses from the same compressed public key, demonstrating the full BRID surface in one shot.
+
+<CodeGroup>
+
+```typescript Mainnet
+import {
+  deriveBitcoinAddress,
+  deriveStacksAddress,
+  deriveEvmAddress,
+} from "@peelbtc/core";
+
+// 33-byte compressed secp256k1 public key (hex → Uint8Array)
+const pubkeyHex =
+  "0365b706e5e2fd20ecb3a2b40d26eca5036a6fe5e8b29a7c7ba51b33b07b2aa31";
+const pubkey = Uint8Array.from(
+  pubkeyHex.match(/.{2}/g)!.map((b) => parseInt(b, 16))
+);
+
+const bitcoin = deriveBitcoinAddress(pubkey);
+// { address: "bc1q...", layer: "bitcoin", namespace: "bip122", format: "p2wpkh", testnet: false }
+
+const stacks = deriveStacksAddress(pubkey);
+// { address: "SP...", layer: "stacks", namespace: "stacks", format: "c32check", testnet: false }
+
+const evm = deriveEvmAddress(pubkey);
+// { address: "0x...", layer: "evm", namespace: "eip155", format: "eip55", testnet: false }
+
+// EVM address is the same on BOB, Rootstock, and Citrea:
+console.log(evm.address); // e.g. "0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B"
+```
+
+```typescript Testnet
+import {
+  deriveBitcoinAddress,
+  deriveStacksAddress,
+  deriveEvmAddress,
+} from "@peelbtc/core";
+
+const pubkeyHex =
+  "0365b706e5e2fd20ecb3a2b40d26eca5036a6fe5e8b29a7c7ba51b33b07b2aa31";
+const pubkey = Uint8Array.from(
+  pubkeyHex.match(/.{2}/g)!.map((b) => parseInt(b, 16))
+);
+
+const bitcoin  = deriveBitcoinAddress(pubkey, true);
+// { address: "tb1q...", ..., testnet: true }
+
+const stacks   = deriveStacksAddress(pubkey, true);
+// { address: "ST...", ..., testnet: true }
+
+const evm      = deriveEvmAddress(pubkey, true);
+// { address: "0x...", ..., testnet: true }
+// Note: EVM address bytes are identical to mainnet — only testnet flag changes
+```
+
+</CodeGroup>
+
+<Tip>
+If you already have a Bitcoin address and a signature (not just a raw public key), use [`buildBridIdentityMap`](/api/core/identity#buildbrididentitymap) instead. It calls `recoverPublicKey` internally and then runs all three derivation functions for you.
+</Tip>

@@ -1,0 +1,205 @@
+---
+title: "Fetch Multi-Layer Bitcoin Balances with Peel"
+sidebarTitle: "Fetch Balances"
+description: "Query BTC-denominated balances across Bitcoin L1, Stacks, BOB, Rootstock, and Citrea from a single BridIdentityMap using fetchBalances()."
+---
+
+`fetchBalances()` queries every Peel-supported layer in parallel and returns a unified `BalanceMap` — a per-layer breakdown alongside a single `totalBtcSats` figure that aggregates all BTC-denominated assets across chains. The routing engine calls `fetchBalances()` internally, but you can call it independently to display balances in a wallet UI, check pre-payment liquidity, or build your own reporting tools.
+
+## What fetchBalances() returns
+
+The function signature is straightforward:
+
+```ts
+import { fetchBalances } from "@peelbtc/sdk";
+
+const result = await fetchBalances(identity, overrides?);
+```
+
+It returns a `BalanceMap`:
+
+```ts
+interface BalanceMap {
+  layers: LayerBalance[];  // one entry per asset per layer
+  totalBtcSats: bigint;    // sum of all BTC-denominated balances, in satoshis
+  fetchedAt: number;       // Unix timestamp (ms) when the fetch was initiated
+}
+```
+
+`totalBtcSats` only includes entries where `isBtc: true` and the fetch succeeded — a failed RPC on one chain does not inflate or zero out the total.
+
+## The LayerBalance interface
+
+Each entry in `result.layers` corresponds to one asset on one chain:
+
+```ts
+interface LayerBalance {
+  layer: string;      // "bitcoin" | "stacks" | "bob" | "rootstock" | "citrea"
+  address: string;    // the address queried
+  asset: string;      // "BTC" | "STX" | "sBTC" | "ETH" | "wBTC" | "RBTC" | "cBTC"
+  kind: "native" | "token";
+  balance: bigint;    // raw balance in smallest unit (sats or wei, see decimals)
+  decimals: number;
+  isBtc: boolean;     // true → contributes to totalBtcSats
+  testnet: boolean;
+  error?: string;     // present when the RPC call failed; balance will be 0n
+}
+```
+
+## Layers queried
+
+`fetchBalances()` covers every Peel-supported chain. A single identity produces one entry per asset:
+
+| Layer | Asset | Kind | Decimals | isBtc |
+|---|---|---|---|---|
+| Bitcoin | BTC | native | 8 | ✅ |
+| Stacks | STX | native | 6 | ❌ |
+| Stacks | sBTC | token | 8 | ✅ |
+| BOB | ETH | native | 18 | ❌ |
+| BOB | wBTC | token | 8 | ✅ |
+| Rootstock | RBTC | native | 18 | ✅ |
+| Citrea | cBTC | native | 18 | ✅ |
+
+## Complete usage example
+
+```ts
+import { fetchBalances } from "@peelbtc/sdk";
+import { buildBridIdentityMap, buildIdentityProofMessage } from "@peelbtc/core";
+
+// Build identity from a BRID-signed Bitcoin address
+const address = "bc1q...";
+const message = buildIdentityProofMessage(address);
+const identity = buildBridIdentityMap(address, message, sigBase64);
+
+// Fetch all layers — optionally supply RPC overrides
+const result = await fetchBalances(identity, {
+  bitcoin:   "https://mempool.space/api",
+  stacks:    "https://api.hiro.so",
+  bob:       "https://rpc.gobob.xyz",
+  rootstock: "https://public-node.rsk.co",
+  citrea:    "https://rpc.mainnet.citrea.xyz",
+});
+
+console.log("Total BTC (sats):", result.totalBtcSats.toString());
+console.log("Fetched at:", new Date(result.fetchedAt).toISOString());
+
+for (const entry of result.layers) {
+  if (entry.error) {
+    console.log(`  ${entry.layer.padEnd(10)} ${entry.asset.padEnd(5)} ERROR — ${entry.error}`);
+  } else {
+    const human = Number(entry.balance) / 10 ** entry.decimals;
+    console.log(`  ${entry.layer.padEnd(10)} ${entry.asset.padEnd(5)} ${human.toFixed(8)}`);
+  }
+}
+```
+
+**Example output:**
+
+```
+Total BTC (sats): 314380
+Fetched at: 2025-01-01T12:00:00.000Z
+  bitcoin    BTC    0.00099792
+  stacks     STX    1.234567
+  stacks     sBTC   0.00034584
+  bob        ETH    0.00000041
+  bob        wBTC   0.00040849
+  rootstock  RBTC   0.00099946
+  citrea     cBTC   0.00039209
+```
+
+## Using RpcOverrides
+
+The `RpcOverrides` interface lets you point any layer at a custom RPC endpoint. All fields are optional — omitted layers fall back to the public endpoints registered in `@peelbtc/core`'s `NETWORKS` registry.
+
+```ts
+interface RpcOverrides {
+  bitcoin?:   string;  // mempool.space-compatible API base URL
+  stacks?:    string;  // Hiro API base URL
+  bob?:       string;  // EVM JSON-RPC URL
+  rootstock?: string;  // EVM JSON-RPC URL
+  citrea?:    string;  // EVM JSON-RPC URL
+}
+```
+
+For production deployments, always supply your own RPC URLs to avoid rate limits on the default public nodes.
+
+## Parallel fetching and fault isolation
+
+All five layers are fetched simultaneously via `Promise.allSettled`. A single failing RPC does not block or fail the overall call — the entry for that layer will carry an `error` field and its `balance` will be `0n`, but all other layers continue normally.
+
+```ts
+const result = await fetchBalances(identity);
+
+const failed = result.layers.filter(e => e.error);
+if (failed.length > 0) {
+  console.warn("Some layers failed:", failed.map(e => `${e.layer}/${e.asset}: ${e.error}`));
+}
+
+// totalBtcSats is still accurate for all layers that succeeded
+console.log("Partial total:", result.totalBtcSats.toString(), "sats");
+```
+
+## Wei → sats conversion
+
+EVM chains store BTC-pegged native assets (RBTC on Rootstock, cBTC on Citrea) in wei — the same 18-decimal unit as ETH. Peel converts these to satoshis when computing `totalBtcSats`:
+
+```
+1 BTC = 10^8 satoshis = 10^18 wei
+1 satoshi = 10^10 wei
+sats = wei / 10^10
+```
+
+8-decimal assets (BTC, sBTC, wBTC) are already in satoshis and are added directly. You can apply the same conversion manually:
+
+```ts
+const WEI_PER_SAT = 10n ** 10n;
+
+for (const entry of result.layers) {
+  let sats: bigint;
+  if (entry.decimals === 8) {
+    sats = entry.balance;               // already in sats
+  } else if (entry.decimals === 18) {
+    sats = entry.balance / WEI_PER_SAT; // wei → sats (integer division)
+  } else {
+    continue; // STX (6 decimals) is not BTC-denominated
+  }
+  console.log(`${entry.layer} ${entry.asset}: ${sats} sats`);
+}
+```
+
+## Filtering for BTC-only balances
+
+Use `entry.isBtc` to isolate the assets that count toward your actual Bitcoin holdings:
+
+```ts
+const btcEntries = result.layers.filter(e => e.isBtc && !e.error);
+
+for (const entry of btcEntries) {
+  console.log(`${entry.layer}: ${entry.asset} — ${entry.balance.toString()} (raw)`);
+}
+
+// Non-BTC assets like STX and ETH are still in result.layers
+// but isBtc = false so they won't appear here
+```
+
+## Testnet support
+
+`fetchBalances()` detects testnet mode automatically from the identity's root Bitcoin address. If `identity.root` starts with `"tb1"`, all chains are queried against their testnet APIs:
+
+- Bitcoin Testnet (mempool.space testnet)
+- Stacks Testnet (api.testnet.hiro.so)
+- BOB Sepolia (bobSepolia)
+- Rootstock Testnet (chainId 31)
+- Citrea Testnet (chainId 5115)
+
+To use testnet, build the identity from a `tb1...` address:
+
+```ts
+const testnetIdentity = buildBridIdentityMap("tb1q...", message, sigBase64);
+const testnetResult = await fetchBalances(testnetIdentity);
+// Queries all testnet RPCs automatically
+```
+
+<Tip>
+  The routing engine calls `fetchBalances()` internally at the start of every `routePayment()` call to check the sender's available liquidity across all chains. You can call it independently before routing to display a balance summary, pre-check that funds exist, or show the user which chains their sats are spread across — without triggering a full routing resolution.
+</Tip>

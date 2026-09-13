@@ -1,0 +1,107 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Peel",
+  "projectDescription": "A unified Bitcoin payment routing SDK that abstracts Bitcoin L1 and L2 address formats, bridge protocols, and transaction models behind a single developer interface.",
+  "theme": "luma",
+  "primaryColor": "#F7931A",
+  "lightColor": "#FFF4E6",
+  "darkColor": "#1A0F00",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/brid-identity",
+              "concepts/routing-engine",
+              "concepts/supported-networks",
+              "concepts/peel-memo"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/route-a-payment",
+              "guides/fetch-balances",
+              "guides/transactions",
+              "guides/bridges",
+              "guides/recipient-recovery"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "@peelbtc/sdk",
+            "pages": [
+              "api/sdk/route-payment",
+              "api/sdk/fetch-balances",
+              "api/sdk/transactions",
+              "api/sdk/bridges",
+              "api/sdk/evm-recovery"
+            ]
+          },
+          {
+            "group": "@peelbtc/core",
+            "pages": [
+              "api/core/address-derivation",
+              "api/core/identity",
+              "api/core/registry"
+            ]
+          },
+          {
+            "group": "@peelbtc/types",
+            "pages": [
+              "api/types/overview"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "BRID (Bitcoin-Rooted Identity Derivation) — derive all L2 addresses from one secp256k1 public key",
+    "routePayment() — single call resolves optimal route, selects bridge, checks liveness, returns execution plan",
+    "fetchBalances() — query BTC-denominated balances across Bitcoin L1, Stacks, BOB, Rootstock, and Citrea in parallel",
+    "Typed transaction pipelines for every supported chain (BOB, Rootstock, Citrea, Stacks)",
+    "Bridge adapters for Rootstock Flyover (BTC↔rBTC), sBTC (BTC↔sBTC on Stacks), and BOB Gateway (BTC↔ETH/wBTC)",
+    "Recipient recovery — derive cross-chain identity from any existing on-chain address without signing",
+    "No private key handling — SignerAdapter boundary enforces external signing (OWS, MetaMask, etc.)",
+    "Peel memo — structured binary tag embedded in every transaction for future indexing",
+    "AI agent integration via MCP server (v2 roadmap)"
+  ],
+  "publicApiSurface": [
+    "routePayment(intent: RouteIntent): Promise<RoutePlan>",
+    "fetchBalances(identity: BridIdentityMap, overrides?: RpcOverrides): Promise<BalanceMap>",
+    "buildBridIdentityMap(address, message, sigBase64): BridIdentityMap",
+    "buildIdentityFromPublicKey(pubkey, testnet?): BridIdentityMap",
+    "deriveBitcoinAddress(pubkey, testnet?): DerivedAddress",
+    "deriveStacksAddress(pubkey, testnet?): DerivedAddress",
+    "deriveEvmAddress(pubkey, testnet?): DerivedAddress",
+    "recoverPublicKey(address, message, sigBase64): Uint8Array",
+    "recoverRecipientIdentity(address, options?): BridIdentityMap",
+    "recoverEvmRecipientIdentity(address, options): BridIdentityMap",
+    "recoverPublicKeyFromEvmAddress(address, options): Uint8Array | null",
+    "buildBobEthTransfer / buildBobTokenTransfer / prepareBobTx / serializeBobTx / encodeBobSignedTx / broadcastBobTx",
+    "buildRootstockTransfer / prepareRootstockTx / serializeRootstockTx / encodeRootstockSignedTx / broadcastRootstockTx",
+    "buildCitreaTransfer / prepareCitreaTx / serializeCitreaTx / encodeCitreaSignedTx / broadcastCitreaTx",
+    "buildStxTransfer / buildSbtcTransfer / prepareStacksTx / encodeStacksSignedTx / broadcastStacksTx",
+    "RootstockFlyoverBridgeAdapter — getPegInPaymentPlan, validatePegInTransaction, pollStatus, getPegoutQuote, depositPegout",
+    "buildSbtcDepositPlan / notifySbtcDeposit / pollSbtcDepositStatus / prepareSbtcWithdrawalTx / pollSbtcWithdrawalStatus",
+    "encodePeelMemo(intentId, userMemo?): EncodedMemo",
+    "NETWORKS / ASSETS / getNetwork / getMainnetNetworks / getTestnetNetworks / getAssetsForNetwork",
+    "PeelError / Caip2 / Caip2Namespace"
+  ]
+}

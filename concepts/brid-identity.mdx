@@ -1,0 +1,197 @@
+---
+title: "BRID: Bitcoin-Rooted Identity Derivation"
+sidebarTitle: "BRID Identity"
+description: "How Peel derives a unified cross-chain identity from a single secp256k1 public key, covering Bitcoin L1, Stacks, and all EVM Bitcoin L2s."
+---
+
+Every Bitcoin L2 uses the same secp256k1 elliptic curve as Bitcoin L1 — yet each layer invents its own address format. BRID (Bitcoin-Rooted Identity Derivation) exploits that shared curve to derive every layer address from a single compressed public key. One key. One identity. Every layer, no chain-specific derivation paths.
+
+## The derivation rules
+
+All three address formats are deterministic functions of the same 33-byte compressed secp256k1 public key. Given a key, every address can be computed offline without any RPC call.
+
+<CardGroup cols={3}>
+  <Card title="Bitcoin L1" icon="bitcoin">
+    `hash160(pubkey)` → bech32 P2WPKH
+
+    `RIPEMD160(SHA256(pubkey))` produces a 20-byte witness program, then bech32-encoded with `bc` HRP (mainnet) or `tb` (testnet). Result: `bc1q...`
+  </Card>
+  <Card title="Stacks" icon="layer-group">
+    `hash160(pubkey)` → c32check
+
+    The **same** `RIPEMD160(SHA256(pubkey))` hash160 as Bitcoin. The only difference is the encoding: c32check with version byte `22` (mainnet → `SP...`) or `26` (testnet → `ST...`).
+  </Card>
+  <Card title="EVM (BOB, Rootstock, Citrea)" icon="code">
+    `keccak256(pubkey[1:])` → last 20 bytes → EIP-55
+
+    Decompress to 65 bytes, strip the `04` prefix, take `keccak256` of the 64 raw bytes, keep the last 20. Apply EIP-55 checksum casing. Result: `0x...`
+  </Card>
+</CardGroup>
+
+<Note>
+  The three EVM addresses (BOB, Rootstock, Citrea) are **always identical**. All three EVM Bitcoin L2s share the same derivation rule. The `buildBridIdentityMap` output expands this into three named per-chain entries so routing code stays chain-specific, but the underlying `0x...` address string is the same across all three.
+</Note>
+
+## The `BridIdentityMap` shape
+
+`buildBridIdentityMap` returns a complete cross-chain identity object. The `derived` array always contains five entries: Bitcoin (repeated as root), Stacks, and three EVM layers.
+
+```typescript
+interface BridIdentityMap {
+  /** Bitcoin P2WPKH root address (bc1q... or tb1q...) */
+  root: string;
+  /** Hex-encoded 33-byte compressed secp256k1 public key */
+  publicKey: string;
+  /** Derived layer addresses — first entry is always the Bitcoin root */
+  derived: DerivedAddress[];
+}
+
+// DerivedAddress shape (each entry in derived[]):
+interface DerivedAddress {
+  address: string;   // Encoded address string
+  layer: string;     // "bitcoin" | "stacks" | "bob" | "rootstock" | "citrea"
+  namespace: string; // "bip122" | "stacks" | "eip155"
+  format: string;    // "p2wpkh" | "c32check" | "eip55"
+  testnet: boolean;
+}
+```
+
+A fully populated `BridIdentityMap` for a mainnet wallet looks like this:
+
+```typescript
+{
+  root: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+  publicKey: "0365b706802f3a5de14353e8b7982c6ec3f27c22a99a34d5f7c5f3d7c9e2e1a4b",
+  derived: [
+    { address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", layer: "bitcoin",   namespace: "bip122",  format: "p2wpkh",  testnet: false },
+    { address: "SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7",  layer: "stacks",    namespace: "stacks",  format: "c32check", testnet: false },
+    { address: "0x388C818CA8B9251b393131C08a736A67ccB19297",  layer: "bob",       namespace: "eip155",  format: "eip55",   testnet: false },
+    { address: "0x388C818CA8B9251b393131C08a736A67ccB19297",  layer: "rootstock", namespace: "eip155",  format: "eip55",   testnet: false },
+    { address: "0x388C818CA8B9251b393131C08a736A67ccB19297",  layer: "citrea",    namespace: "eip155",  format: "eip55",   testnet: false },
+  ]
+}
+```
+
+## Two ways to establish identity
+
+<Tabs>
+  <Tab title="BRID Signing (interactive)">
+    When the sender controls the wallet, use `buildBridIdentityMap`. The wallet signs a canonical BRID Identity Proof message, which reveals the public key via secp256k1 elliptic curve recovery — no private key is ever exposed.
+
+    **Step 1 — Build the message the wallet must sign:**
+
+    ```typescript
+    import { buildIdentityProofMessage } from "@peelbtc/core";
+
+    const message = buildIdentityProofMessage("bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq");
+    // → "BRID Identity Proof:\nBitcoin Address: bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+    ```
+
+    The public key is **never embedded** in the message — it is revealed implicitly through the act of signing and recovered via secp256k1 public key recovery.
+
+    **Step 2 — Build the full identity map from the signature:**
+
+    ```typescript
+    import { buildBridIdentityMap } from "@peelbtc/core";
+
+    const identity = buildBridIdentityMap(
+      "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", // claimed Bitcoin address
+      message,                                        // canonical BRID proof message
+      signatureBase64,                                // 65-byte signature, base64-encoded
+    );
+
+    // identity.root       → "bc1q..."
+    // identity.publicKey  → "0365b706..."
+    // identity.derived    → [bitcoin, stacks, bob, rootstock, citrea]
+    ```
+
+    The recovered address is verified against the claimed address before returning — a mismatched signature throws immediately.
+  </Tab>
+  <Tab title="Passive Recovery (no signing)">
+    When you need the identity of a *recipient* who has already made on-chain transactions, use `recoverRecipientIdentity`. No interaction is required from the recipient — their public key is extracted from existing on-chain data.
+
+    ```typescript
+    import { recoverRecipientIdentity } from "@peelbtc/core";
+
+    // Works for any address format: Bitcoin, Stacks, or EVM
+    const identity = await recoverRecipientIdentity("SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7");
+
+    if (identity) {
+      // identity.root      → derived Bitcoin address
+      // identity.publicKey → recovered compressed pubkey
+      // identity.derived   → [bitcoin, stacks, bob, rootstock, citrea]
+    }
+    ```
+
+    Recovery sources per address type:
+
+    | Address | Source | Requirement |
+    |---|---|---|
+    | `bc1q...` Bitcoin | Compressed pubkey in P2WPKH spending witness | Address must have spent a UTXO |
+    | `SP...` Stacks | ECDSA recovery from any signed Stacks tx | Address must have sent a tx |
+    | `0x...` EVM | ECDSA recovery from any signed EVM tx | Address must have sent a tx |
+
+    <Warning>
+      Receive-only addresses that have **never sent** a transaction have not revealed their public key on-chain and cannot be passively recovered. For those wallets, the interactive BRID signing step is still required.
+    </Warning>
+  </Tab>
+</Tabs>
+
+## Accepted signature formats
+
+`buildBridIdentityMap` and `recoverPublicKey` accept two signature formats in the same base64-encoded 65-byte envelope:
+
+<Accordion title="Noble / OWS format (raw recovery ID)">
+  The first byte is the raw secp256k1 recovery ID: `0` or `1`. Used by `@noble/curves`, the Open Wallet Standard, and similar modern libraries.
+
+  ```
+  65 bytes = [ 0 | 1 ] || r(32) || s(32)
+  ```
+</Accordion>
+
+<Accordion title="BIP137 format (Bitcoin wallet header byte)">
+  The first byte encodes both the address type and recovery ID. Used by Sparrow, Electrum, Ledger, Trezor, and most Bitcoin hardware wallets.
+
+  ```
+  65 bytes = [ header ] || r(32) || s(32)
+
+  Header ranges:
+    27–30  → P2PKH uncompressed  (rejected by BRID)
+    31–34  → P2PKH compressed    (rejected by BRID)
+    35–38  → P2SH-P2WPKH         (rejected by BRID)
+    39–42  → P2WPKH bech32       ✅ only type BRID accepts
+  ```
+
+  Only P2WPKH bech32 headers (39–42) are valid for BRID. All other BIP137 types are rejected because BRID requires a native SegWit address as root.
+</Accordion>
+
+## Full example
+
+```typescript
+import {
+  buildIdentityProofMessage,
+  buildBridIdentityMap,
+} from "@peelbtc/core";
+import { routePayment } from "@peelbtc/sdk";
+
+// 1. Build the message and have the wallet sign it
+const btcAddress = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
+const message = buildIdentityProofMessage(btcAddress);
+
+// wallet.sign(message) → base64 string (BIP137 P2WPKH header 39–42, or raw 0/1)
+const signatureBase64 = await wallet.signMessage(message);
+
+// 2. Recover the public key and derive all layer addresses
+const identity = buildBridIdentityMap(btcAddress, message, signatureBase64);
+
+console.log(identity.root);      // "bc1q..."      — Bitcoin root
+console.log(identity.publicKey); // "0365b706..."  — 33-byte compressed pubkey (hex)
+console.log(identity.derived);   // [bitcoin, stacks, bob, rootstock, citrea]
+
+// 3. Pass identity directly to routePayment
+const plan = await routePayment({
+  from: identity,
+  to: "SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7",
+  amountSats: 100_000n,
+});
+```

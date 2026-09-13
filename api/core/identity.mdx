@@ -1,0 +1,414 @@
+---
+title: "BRID Identity Building and Key Recovery"
+sidebarTitle: "Identity"
+description: "Build a cross-chain BRID identity from a Bitcoin message signature, or recover one passively from existing on-chain transaction data."
+---
+
+The identity module in `@peelbtc/core` implements both sides of the BRID (Bitcoin Root Identity Derivation) protocol. The **interactive path** asks a wallet to sign a canonical proof message and recovers the compressed secp256k1 public key from that signature — no private key exposure required. The **passive path** extracts the same public key from transaction witness data already on-chain, so the recipient never needs to do anything. Both paths ultimately call [`buildIdentityFromPublicKey`](#buildidentityfrompublickey) to produce a `BridIdentityMap` containing the root Bitcoin address, the compressed public key hex, and derived addresses for every supported layer.
+
+---
+
+## Interactive path — requires signing
+
+Use these functions when you control the wallet (sender-side identity) or when you need to establish identity for an address that has no on-chain spending history.
+
+### `buildIdentityProofMessage`
+
+Returns the canonical BRID Identity Proof message string that the wallet must sign. The public key is never embedded in the message — it is revealed implicitly through the act of signing and recovered via `recoverPublicKey`.
+
+```typescript
+function buildIdentityProofMessage(address: string): string
+```
+
+<ParamField path="address" type="string" required>
+  The signer's Bitcoin P2WPKH address (`bc1q...` on mainnet, `tb1q...` on testnet).
+</ParamField>
+
+**Return value:** A string with the exact format:
+```
+BRID Identity Proof:\nBitcoin Address: <address>
+```
+
+```typescript
+buildIdentityProofMessage("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4");
+// → "BRID Identity Proof:\nBitcoin Address: bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+```
+
+---
+
+### `hashBitcoinMessage`
+
+Computes the Bitcoin message hash using the standard magic-prefix double-SHA256 format. Most wallets handle this internally — expose this function when your signing primitive needs the pre-computed hash directly.
+
+```typescript
+function hashBitcoinMessage(message: string): Uint8Array
+```
+
+**Wire format:**
+```
+SHA256(SHA256(
+  \x18 "Bitcoin Signed Message:\n"  // 24-byte prefix, length as single byte
+  || varint(len(message))
+  || message
+))
+```
+
+<ParamField path="message" type="string" required>
+  The message to hash. Must be fewer than 253 bytes (single-byte varint range). Throws `Error` if the message is 253 bytes or longer.
+</ParamField>
+
+**Return value:** A 32-byte `Uint8Array` — the double-SHA256 digest ready to pass to a secp256k1 recovery function.
+
+---
+
+### `recoverPublicKey`
+
+Recovers the 33-byte compressed secp256k1 public key from a base64-encoded Bitcoin message signature. After recovery, the derived Bitcoin address is verified against the `address` argument — a mismatch throws immediately.
+
+```typescript
+function recoverPublicKey(
+  address: string,
+  message: string,
+  signatureBase64: string
+): Uint8Array
+```
+
+<ParamField path="address" type="string" required>
+  The claimed Bitcoin P2WPKH address (`bc1q...` or `tb1q...`). The recovered key is verified against this address before being returned.
+</ParamField>
+
+<ParamField path="message" type="string" required>
+  The message that was signed. Use `buildIdentityProofMessage(address)` to generate the canonical BRID proof message.
+</ParamField>
+
+<ParamField path="signatureBase64" type="string" required>
+  65-byte Bitcoin message signature, base64-encoded. See [signature format details](#signature-format) below for accepted header bytes.
+</ParamField>
+
+**Return value:** A 33-byte `Uint8Array` — the compressed secp256k1 public key. Pass this to `deriveStacksAddress`, `deriveEvmAddress`, or `buildIdentityFromPublicKey`.
+
+**Throws:**
+- If base64 decoding fails
+- If the decoded bytes are not exactly 65 bytes
+- If the header byte is not in a recognized range (0–1 or 27–42)
+- If the header byte is 27–38 (P2PKH or P2SH-P2WPKH — BRID only accepts bech32)
+- If the recovered address does not match the claimed `address`
+
+---
+
+### `buildBridIdentityMap`
+
+Convenience wrapper that calls `recoverPublicKey` and then derives all layer addresses from the recovered key. This is the primary entry point for the interactive BRID signing flow.
+
+```typescript
+function buildBridIdentityMap(
+  address: string,
+  message: string,
+  signatureBase64: string
+): BridIdentityMap
+```
+
+<ParamField path="address" type="string" required>
+  Bitcoin P2WPKH address (`bc1q...` or `tb1q...`).
+</ParamField>
+
+<ParamField path="message" type="string" required>
+  The signed message. Should be the output of `buildIdentityProofMessage(address)`.
+</ParamField>
+
+<ParamField path="signatureBase64" type="string" required>
+  65-byte Bitcoin message signature, base64-encoded.
+</ParamField>
+
+**Return value:** [`BridIdentityMap`](#brididentitymap-interface) — root address, compressed pubkey hex, and `derived` array with entries for Bitcoin, Stacks, BOB, Rootstock, and Citrea.
+
+<Note>
+The EVM address (used by BOB, Rootstock, and Citrea) is derived once from the recovered key and then duplicated into three separate `derived` entries — one per chain. The `address` string is identical across all three, but each entry carries a distinct `layer` value (`"bob"`, `"rootstock"`, `"citrea"`).
+</Note>
+
+---
+
+## Passive path — no signing required
+
+These functions extract the public key from transaction data that is already on-chain, so the recipient never needs to take any action. Use them when you have a recipient address and want to derive their full cross-chain identity without their involvement.
+
+### `recoverPublicKeyFromAddress`
+
+Attempts to recover the 33-byte compressed public key from a Stacks or Bitcoin address using on-chain transaction data. Returns `null` if recovery fails.
+
+```typescript
+async function recoverPublicKeyFromAddress(
+  address: string,
+  options?: RecipientRecoveryOptions
+): Promise<Uint8Array | null>
+```
+
+<ParamField path="address" type="string" required>
+  A Stacks address (`SP...` / `ST...`) or Bitcoin address (`bc1q...` / `tb1q...`). For EVM (`0x...`) addresses, use `recoverPublicKeyFromEvmAddress` in `@peelbtc/sdk`.
+</ParamField>
+
+<ParamField path="options" type="RecipientRecoveryOptions">
+  Optional API URL overrides and testnet flag. See [`RecipientRecoveryOptions`](#recipientrecoveryoptions-interface).
+</ParamField>
+
+**Return value:** A 33-byte `Uint8Array` compressed public key, or `null` if:
+- The address has never sent a transaction (pubkey not yet revealed on-chain)
+- The API call fails or returns unexpected data
+- The witness data format is unrecognized
+
+**Recovery mechanisms by address type:**
+
+| Address prefix | Source | Notes |
+|---|---|---|
+| `bc1q` / `tb1q` | P2WPKH spending witness (`witness[1]`) | Requires the address to have spent at least one UTXO |
+| `SP` / `ST` | ECDSA recovery from signed Stacks tx via Hiro API | Any address that has sent a transaction |
+
+---
+
+### `recoverRecipientIdentity`
+
+High-level wrapper: recovers the public key from on-chain data and returns a full `BridIdentityMap`. Returns `null` if recovery fails.
+
+```typescript
+async function recoverRecipientIdentity(
+  address: string,
+  options?: RecipientRecoveryOptions
+): Promise<BridIdentityMap | null>
+```
+
+<ParamField path="address" type="string" required>
+  A Stacks or Bitcoin address. EVM addresses are handled by `@peelbtc/sdk`.
+</ParamField>
+
+<ParamField path="options" type="RecipientRecoveryOptions">
+  Optional API URL overrides and testnet flag.
+</ParamField>
+
+**Return value:** [`BridIdentityMap`](#brididentitymap-interface) or `null`.
+
+---
+
+### `buildIdentityFromPublicKey`
+
+Pure function (no network calls). Given a known compressed public key, derives a complete `BridIdentityMap`. Use this after any on-chain recovery path — or any time you already have the key in hand.
+
+```typescript
+function buildIdentityFromPublicKey(
+  pubkey: Uint8Array | string,
+  testnet?: boolean
+): BridIdentityMap
+```
+
+<ParamField path="pubkey" type="Uint8Array | string" required>
+  33-byte compressed secp256k1 public key. Accepts either a `Uint8Array` or a hex string (with or without `0x` prefix). Throws if the decoded key is not exactly 33 bytes.
+</ParamField>
+
+<ParamField path="testnet" type="boolean" default="false">
+  When `true`, all derived addresses are testnet variants (`tb1q...`, `ST...`, etc.).
+</ParamField>
+
+**Return value:** [`BridIdentityMap`](#brididentitymap-interface).
+
+---
+
+## `BridIdentityMap` interface
+
+Returned by `buildBridIdentityMap`, `buildIdentityFromPublicKey`, and `recoverRecipientIdentity`.
+
+```typescript
+interface BridIdentityMap {
+  /** Bitcoin P2WPKH root address (bc1q... or tb1q...) */
+  root: string;
+
+  /** Hex-encoded 33-byte compressed secp256k1 public key */
+  publicKey: string;
+
+  /** Derived layer addresses — first entry is always the Bitcoin root */
+  derived: DerivedAddress[];
+}
+```
+
+<ResponseField name="root" type="string">
+  The Bitcoin P2WPKH address. This is the canonical BRID root — the address the wallet signed with.
+</ResponseField>
+
+<ResponseField name="publicKey" type="string">
+  Hex-encoded 33-byte compressed secp256k1 public key, e.g. `"0365b706e5..."`. 66 hex characters, no `0x` prefix.
+</ResponseField>
+
+<ResponseField name="derived" type="DerivedAddress[]">
+  Array of derived addresses across all supported layers. Typical order: `[bitcoin, stacks, bob, rootstock, citrea]`. Each entry is a `DerivedAddress` — see [Address Derivation](/api/core/address-derivation#derivedaddress-interface) for the full shape.
+</ResponseField>
+
+---
+
+## `RecipientRecoveryOptions` interface
+
+```typescript
+interface RecipientRecoveryOptions {
+  /**
+   * Hiro API base URL for Stacks address recovery.
+   * Defaults to https://api.hiro.so (mainnet) or https://api.testnet.hiro.so.
+   */
+  hiroBaseUrl?: string;
+
+  /**
+   * Mempool.space base URL for Bitcoin address recovery.
+   * Defaults to https://mempool.space/api.
+   */
+  bitcoinApiUrl?: string;
+
+  /** Whether to use testnet APIs. Defaults to false. */
+  testnet?: boolean;
+}
+```
+
+<ResponseField name="hiroBaseUrl" type="string">
+  Override the Hiro Platform API base URL for Stacks transaction lookup. Useful for private Hiro Platform nodes or custom indexers.
+</ResponseField>
+
+<ResponseField name="bitcoinApiUrl" type="string">
+  Override the mempool.space API base URL for Bitcoin transaction lookup. Useful for self-hosted mempool instances or alternative block explorers.
+</ResponseField>
+
+<ResponseField name="testnet" type="boolean">
+  When `true`, defaults to `https://api.testnet.hiro.so` for Stacks and `https://mempool.space/testnet/api` for Bitcoin (unless overridden by the URL fields).
+</ResponseField>
+
+---
+
+## Signature format
+
+`recoverPublicKey` accepts two signature layouts in the first byte of the 65-byte signature:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  BIP137 format (Bitcoin wallets: Sparrow, Electrum, Ledger, Trezor)     │
+│  65 bytes: [ header ] || r (32 bytes) || s (32 bytes)                   │
+│                                                                          │
+│  Header byte encodes address type + recovery ID:                         │
+│    27–30: P2PKH uncompressed  (rejected by BRID)                        │
+│    31–34: P2PKH compressed    (rejected by BRID)                        │
+│    35–38: P2SH-P2WPKH        (rejected by BRID)                        │
+│    39–42: P2WPKH bech32  ✓   recoveryId = header - 39                  │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Noble / OWS format (raw recovery ID)                                   │
+│  65 bytes: [ 0 | 1 ] || r (32 bytes) || s (32 bytes)                   │
+│                                                                          │
+│  First byte is the raw secp256k1 recovery ID (0 or 1).                  │
+│  Used by @noble/curves, OpenWallet Standard, and similar libraries.     │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+<Note>
+BRID only accepts P2WPKH bech32 signatures (BIP137 header bytes 39–42). If your wallet produces a BIP137 signature with header bytes 27–38 (P2PKH or P2SH-P2WPKH), it is using a legacy address type and `recoverPublicKey` will throw with a descriptive error.
+</Note>
+
+### OWS byte-order rotation
+
+OWS emits `r || s || recovery_id` (recovery ID as the **last** byte). Noble expects `recovery_id || r || s` (recovery ID as the **first** byte). Rotate before calling:
+
+```typescript
+// OWS signature layout: [ r(32) || s(32) || recovery_id(1) ]
+function owsToNoble(owsSig: Uint8Array): Uint8Array {
+  if (owsSig.length !== 65) throw new Error("Expected 65 bytes");
+  const recoveryId = owsSig[64]; // last byte
+  const noble = new Uint8Array(65);
+  noble[0] = recoveryId;         // move to first byte
+  noble.set(owsSig.slice(0, 64), 1);
+  return noble;
+}
+
+const nobleSig = owsToNoble(owsSignatureBytes);
+const pubkey = recoverPublicKey(address, message, btoa(String.fromCharCode(...nobleSig)));
+```
+
+---
+
+## Complete examples
+
+<CodeGroup>
+
+```typescript Interactive flow (wallet signing)
+import {
+  buildIdentityProofMessage,
+  recoverPublicKey,
+  buildBridIdentityMap,
+} from "@peelbtc/core";
+
+// 1. Build the message the wallet must sign
+const address = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
+const message = buildIdentityProofMessage(address);
+// → "BRID Identity Proof:\nBitcoin Address: bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+
+// 2. Present message to the wallet — wallet returns a base64 signature
+//    (e.g. via window.bitcoin.signMessage or a hardware wallet prompt)
+const signatureBase64 = await wallet.signMessage(message);
+
+// 3. Recover just the public key if you need it directly
+const pubkey = recoverPublicKey(address, message, signatureBase64);
+// → Uint8Array [3, 101, 183, 6, ...]  (33 bytes)
+
+// 4. Or build the full identity map in one call
+const identity = buildBridIdentityMap(address, message, signatureBase64);
+// {
+//   root:      "bc1qar0srrr7...",
+//   publicKey: "0365b706e5e2...",
+//   derived: [
+//     { address: "bc1qar0srrr7...", layer: "bitcoin",   format: "p2wpkh",   ... },
+//     { address: "SP2J6ZY48GV...", layer: "stacks",    format: "c32check", ... },
+//     { address: "0xAb5801a7D3...", layer: "bob",        format: "eip55",    ... },
+//     { address: "0xAb5801a7D3...", layer: "rootstock",  format: "eip55",    ... },
+//     { address: "0xAb5801a7D3...", layer: "citrea",     format: "eip55",    ... },
+//   ],
+// }
+```
+
+```typescript Passive recovery (recipient lookup)
+import {
+  recoverRecipientIdentity,
+  recoverPublicKeyFromAddress,
+  buildIdentityFromPublicKey,
+} from "@peelbtc/core";
+
+// High-level: full identity from a Stacks address
+const identity = await recoverRecipientIdentity("SP2J6ZY48GV1EZ5V2V5RB9MP66SW86PYKKNRV9EJ7");
+if (identity) {
+  console.log(identity.root);      // Bitcoin address
+  console.log(identity.publicKey); // Hex compressed pubkey
+  console.log(identity.derived);   // All layer addresses
+}
+
+// Low-level: just recover the pubkey from a Bitcoin address
+const pubkey = await recoverPublicKeyFromAddress("bc1qrk3...", {
+  bitcoinApiUrl: "https://my-mempool.example.com/api",
+  testnet: false,
+});
+
+if (pubkey) {
+  // Build the full identity locally — no more network calls needed
+  const identity = buildIdentityFromPublicKey(pubkey);
+}
+
+// buildIdentityFromPublicKey also accepts a hex string
+const identityFromHex = buildIdentityFromPublicKey(
+  "0365b706e5e2fd20ecb3a2b40d26eca5036a6fe5e8b29a7c7ba51b33b07b2aa31"
+);
+```
+
+```typescript Testnet recovery
+import { recoverRecipientIdentity } from "@peelbtc/core";
+
+const identity = await recoverRecipientIdentity(
+  "ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM",
+  { testnet: true, hiroBaseUrl: "https://api.testnet.hiro.so" }
+);
+```
+
+</CodeGroup>
+
+<Warning>
+**Receive-only addresses** that have never broadcast a transaction have not yet revealed their public key on-chain. `recoverPublicKeyFromAddress` and `recoverRecipientIdentity` return `null` for these addresses. Fall back to the interactive signing flow (`buildBridIdentityMap`) to establish identity for new addresses.
+</Warning>

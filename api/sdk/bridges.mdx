@@ -1,0 +1,657 @@
+---
+title: "Bridge Adapters: sBTC, Flyover, and BOB Gateway"
+sidebarTitle: "Bridges"
+description: "API reference for the sBTC peg-in/peg-out bridge, the Rootstock Flyover adapter, and BOB Gateway constants exported from @peelbtc/sdk."
+---
+
+The SDK exports two bridge integrations directly: the **sBTC bridge** (Bitcoin
+↔ Stacks via the sBTC Signers network) and the **Rootstock Flyover adapter**
+(Bitcoin ↔ Rootstock via the Flyover LP network). BOB Gateway is supported
+through the routing engine as a `BridgeDepositStep` — the actual swap is
+delegated to the `gateway-cli` tool. All three bridges are selected
+automatically by `routePayment` when the source and destination require a
+bridge, but you can also call them directly for custom flows.
+
+---
+
+## Import
+
+```typescript
+import {
+  // sBTC bridge functions
+  buildSbtcDepositPlan,
+  notifySbtcDeposit,
+  pollSbtcDepositStatus,
+  prepareSbtcWithdrawalTx,
+  pollSbtcWithdrawalStatus,
+  decodeBtcAddress,
+
+  // Rootstock Flyover
+  RootstockFlyoverBridgeAdapter,
+  FLYOVER_LBC_ADDRESS,
+  FLYOVER_LIMITS,
+} from "@peelbtc/sdk";
+```
+
+---
+
+## sBTC Bridge
+
+The sBTC bridge is **mainnet only**. It uses the sBTC Signers network operated
+by the Stacks Foundation.
+
+**Peg-in flow (BTC → sBTC):**
+1. `buildSbtcDepositPlan()` — fetch the Signers' aggregate pubkey, build the P2TR deposit address
+2. Agent broadcasts a BTC tx to `plan.depositAddress` (with `peelMemo` as `OP_RETURN`)
+3. `notifySbtcDeposit()` — notify the Emily API immediately after broadcast
+4. `pollSbtcDepositStatus()` — poll until sBTC is minted (~20 min, 1–2 BTC confirmations)
+
+**Peg-out flow (sBTC → BTC):**
+1. `prepareSbtcWithdrawalTx()` — build unsigned Stacks contract call
+2. `encodeStacksSignedTx()` — inject OWS signature
+3. `broadcastStacksTx()` — broadcast to Stacks
+4. `pollSbtcWithdrawalStatus()` — poll until BTC arrives (~6 BTC confirmations, ~1 hour)
+
+**Contracts (mainnet):**
+- sBTC token: `SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token`
+- sBTC withdrawal: `SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-withdrawal`
+- Emily API: `https://sbtc-emily.com`
+
+---
+
+### `buildSbtcDepositPlan(opts)`
+
+Fetches the sBTC Signers' aggregate public key from Emily, builds the P2TR
+deposit address, and returns everything the agent needs to construct and
+broadcast the BTC deposit transaction.
+
+```typescript
+async function buildSbtcDepositPlan(opts: {
+  amountSats: bigint;
+  stacksAddress: string;
+  reclaimPublicKey: string;
+  reclaimLockTime?: number;
+  maxSignerFee?: number;
+}): Promise<SbtcDepositPlan>
+```
+
+<ParamField body="amountSats" type="bigint" required>
+  Amount to bridge, in satoshis. Must be greater than 0.
+</ParamField>
+
+<ParamField body="stacksAddress" type="string" required>
+  Stacks address (`SP…`) that will receive the minted sBTC.
+</ParamField>
+
+<ParamField body="reclaimPublicKey" type="string" required>
+  The depositor's x-only 32-byte Schnorr pubkey, hex-encoded (64 hex chars).
+  This is the compressed BTC pubkey with the `02`/`03` prefix stripped — only
+  the 32-byte x-coordinate. Used in the reclaim tapscript so the depositor can
+  recover funds if the Signers do not process the deposit.
+
+  ```typescript
+  // Strip the 02/03 prefix from your OWS compressed pubkey:
+  const reclaimPublicKey = owsCompressedPubkey.slice(2); // remove first byte
+  ```
+</ParamField>
+
+<ParamField body="reclaimLockTime" type="number">
+  Bitcoin blocks after which the depositor can reclaim. Default: `950` blocks
+  (~1 week).
+</ParamField>
+
+<ParamField body="maxSignerFee" type="number">
+  Maximum fee in satoshis the sBTC Signers may charge for sweeping the deposit.
+  Deducted from minted sBTC if less than actual fee. Default: `80_000` sats.
+</ParamField>
+
+#### `SbtcDepositPlan`
+
+<ResponseField name="depositAddress" type="string">
+  P2TR address the agent must send BTC to. This is the only required output.
+</ResponseField>
+<ResponseField name="amountSats" type="bigint">
+  Amount to send in satoshis.
+</ResponseField>
+<ResponseField name="maxSignerFee" type="number">
+  Maximum Signer fee in satoshis.
+</ResponseField>
+<ResponseField name="reclaimLockTime" type="number">
+  BTC blocks before reclaim is possible.
+</ResponseField>
+<ResponseField name="stacksAddress" type="string">
+  Stacks address that will receive sBTC.
+</ResponseField>
+<ResponseField name="signersPublicKey" type="string">
+  x-only 32-byte Schnorr pubkey of the sBTC Signers aggregate (informational).
+</ResponseField>
+<ResponseField name="reclaimPublicKey" type="string">
+  The depositor's x-only pubkey used in the reclaim tapscript.
+</ResponseField>
+<ResponseField name="estimatedMintTimeSecs" type="number">
+  Estimated time to receive sBTC after 1–2 Bitcoin confirmations (~1200 seconds).
+</ResponseField>
+
+---
+
+### `notifySbtcDeposit(plan, btcTxHex)`
+
+Notify the sBTC Signers (Emily API) about the BTC deposit transaction. Call
+immediately after the BTC tx appears in the mempool. The Emily API requires the
+raw hex of the deposit transaction.
+
+```typescript
+async function notifySbtcDeposit(
+  plan: SbtcDepositPlan,
+  btcTxHex: string,
+): Promise<SbtcNotifyResponse>
+```
+
+<ParamField body="plan" type="SbtcDepositPlan" required>
+  The deposit plan returned by `buildSbtcDepositPlan`.
+</ParamField>
+
+<ParamField body="btcTxHex" type="string" required>
+  Raw hex of the broadcasted BTC transaction. Fetch from mempool.space:
+
+  ```typescript
+  const txHex = await fetch(
+    `https://mempool.space/api/tx/${txid}/hex`
+  ).then((r) => r.text());
+  ```
+</ParamField>
+
+#### `SbtcNotifyResponse`
+
+```typescript
+interface SbtcNotifyResponse {
+  bitcoinTxid: string;
+  bitcoinTxOutputIndex: number;
+  recipient: string;
+  amount: number;
+  lastUpdateHeight: number;
+  lastUpdateBlockHash: string;
+  status: string;
+  statusMessage: string;
+  parameters: { maxFee: number; lockTime: number };
+  reclaimScript: string;
+  depositScript: string;
+}
+```
+
+---
+
+### `pollSbtcDepositStatus(btcTxid)`
+
+Poll the Emily API for the status of a BTC deposit (peg-in).
+
+```typescript
+async function pollSbtcDepositStatus(
+  btcTxid: string,
+): Promise<SbtcDepositStatusEntry>
+```
+
+<ParamField body="btcTxid" type="string" required>
+  The txid of the BTC deposit transaction.
+</ParamField>
+
+#### `SbtcDepositStatusEntry`
+
+```typescript
+interface SbtcDepositStatusEntry {
+  bitcoinTxid: string;
+  bitcoinTxOutputIndex: number;
+  recipient: string;
+  amount: number;
+  status: "pending" | "confirmed" | "failed" | string;
+  statusMessage: string;
+  lastUpdateHeight: number;
+  fulfillment?: {
+    BitcoinTxid: string;
+    StacksTxid: string;
+    BitcoinBlockHeight: number;
+    BtcFee: number;
+  };
+}
+```
+
+---
+
+### `prepareSbtcWithdrawalTx(opts)`
+
+Fetch the sender's current nonce and build an unsigned Stacks contract call to
+`initiate-withdrawal-request` on the sBTC withdrawal contract. Returns a
+`StacksTxPrepared` that feeds directly into `encodeStacksSignedTx` →
+`broadcastStacksTx`.
+
+The contract call locks `amountSats + maxFeeSats` sBTC from the sender. Once
+processed by the Signers (~6 BTC confirmations), `amountSats` BTC is sent to
+`btcRecipientAddress` and any unused fee is refunded as sBTC.
+
+```typescript
+async function prepareSbtcWithdrawalTx(opts: {
+  stacksAddress: string;
+  publicKey: string;
+  btcRecipientAddress: string;
+  amountSats: bigint;
+  maxFeeSats?: bigint;
+  hiroBaseUrl?: string;
+}): Promise<StacksTxPrepared>
+```
+
+<ParamField body="stacksAddress" type="string" required>
+  Sender's Stacks address (`SP…`). Must hold sBTC.
+</ParamField>
+
+<ParamField body="publicKey" type="string" required>
+  Sender's 33-byte compressed secp256k1 pubkey, hex-encoded (from OWS).
+</ParamField>
+
+<ParamField body="btcRecipientAddress" type="string" required>
+  Bitcoin address to receive BTC. Supported types: P2TR (`bc1p…`), P2WPKH
+  (`bc1q…`), P2SH (`3…`), P2PKH (`1…`).
+</ParamField>
+
+<ParamField body="amountSats" type="bigint" required>
+  sBTC amount to withdraw, in satoshis.
+</ParamField>
+
+<ParamField body="maxFeeSats" type="bigint">
+  Maximum fee for the Bitcoin sweep transaction. Default: `3_000n` sats.
+</ParamField>
+
+<ParamField body="hiroBaseUrl" type="string">
+  Override Hiro API base URL for nonce fetching.
+</ParamField>
+
+---
+
+### `pollSbtcWithdrawalStatus(stacksAddress)`
+
+Poll the Emily API for the status of sBTC withdrawal requests from a sender.
+Returns all withdrawal entries, most recent first.
+
+```typescript
+async function pollSbtcWithdrawalStatus(
+  stacksAddress: string,
+): Promise<SbtcWithdrawalStatusEntry[]>
+```
+
+<ParamField body="stacksAddress" type="string" required>
+  The sender's Stacks address.
+</ParamField>
+
+#### `SbtcWithdrawalStatusEntry`
+
+```typescript
+interface SbtcWithdrawalStatusEntry {
+  requestId: number;
+  sender: string;
+  recipient: string;
+  amount: number;
+  status: "pending" | "accepted" | "confirmed" | "failed" | string;
+  txid?: string;
+  lastUpdateHeight: number;
+}
+```
+
+---
+
+### `decodeBtcAddress(address)`
+
+Decode a mainnet Bitcoin address into the Clarity-compatible
+`{ version, hashbytes }` tuple required by the sBTC
+`initiate-withdrawal-request` contract function. Used internally by
+`prepareSbtcWithdrawalTx`.
+
+```typescript
+function decodeBtcAddress(btcAddress: string): {
+  version: Uint8Array;    // 1 byte — Clarity version buffer
+  hashbytes: Uint8Array;  // 20 or 32 bytes — Clarity hashbytes buffer
+}
+```
+
+Supported address types and Clarity version bytes:
+
+| Address type | Example | Clarity version |
+|---|---|---|
+| P2PKH | `1ABC…` | `0x00` |
+| P2SH | `3ABC…` | `0x01` |
+| P2WPKH | `bc1q…` (20-byte program) | `0x04` |
+| P2WSH | `bc1q…` (32-byte program) | `0x05` |
+| P2TR | `bc1p…` (32-byte program) | `0x06` |
+
+---
+
+### Full sBTC peg-in example
+
+```typescript
+import {
+  buildSbtcDepositPlan,
+  notifySbtcDeposit,
+  pollSbtcDepositStatus,
+} from "@peelbtc/sdk";
+
+// Step 1: build the deposit plan
+const plan = await buildSbtcDepositPlan({
+  amountSats: 100_000n,
+  stacksAddress: "SP1ABC...",
+  reclaimPublicKey: "65b706...", // 32-byte x-only, strip 02/03 prefix
+  maxSignerFee: 80_000,
+});
+
+console.log("Send BTC to:", plan.depositAddress);
+console.log("Amount:", plan.amountSats, "sats");
+console.log("Max signer fee:", plan.maxSignerFee, "sats");
+
+// Step 2: build BTC tx via OWS, include peelMemo as OP_RETURN output
+// Step 3: broadcast BTC tx → get txid
+
+// Step 4: notify Emily immediately after broadcast
+const txHex = await fetch(
+  `https://mempool.space/api/tx/${txid}/hex`
+).then((r) => r.text());
+await notifySbtcDeposit(plan, txHex);
+
+// Step 5: poll for confirmation (~20 minutes)
+const status = await pollSbtcDepositStatus(txid);
+console.log("Status:", status.status); // "pending" | "confirmed" | "failed"
+```
+
+---
+
+### Full sBTC peg-out example
+
+```typescript
+import {
+  prepareSbtcWithdrawalTx,
+  pollSbtcWithdrawalStatus,
+} from "@peelbtc/sdk";
+import { encodeStacksSignedTx, broadcastStacksTx } from "@peelbtc/sdk";
+
+const prepared = await prepareSbtcWithdrawalTx({
+  stacksAddress: "SP1ABC...",
+  publicKey: "0365b706...", // 33-byte compressed pubkey from OWS
+  btcRecipientAddress: "bc1p...",
+  amountSats: 100_000n,
+  maxFeeSats: 3_000n,
+});
+
+// ows sign tx --chain bitcoin --tx <prepared.preSignSigHash> --json
+const owsSig = { signature: "<hex r||s||v from OWS>" };
+
+const signedHex = encodeStacksSignedTx(prepared, owsSig);
+const txid = await broadcastStacksTx(signedHex, false);
+
+// Poll until BTC arrives (~1 hour, 6 Bitcoin confirmations)
+const entries = await pollSbtcWithdrawalStatus("SP1ABC...");
+console.log("Latest status:", entries[0]?.status);
+```
+
+---
+
+## Rootstock Flyover
+
+The Rootstock Flyover adapter wraps the `@rsksmart/flyover-sdk` to provide a
+Peel-compatible interface. It selects a liquidity provider automatically and
+prefers CAPTCHA-free LPs for CLI/agent environments.
+
+### `new RootstockFlyoverBridgeAdapter(options?)`
+
+```typescript
+const adapter = new RootstockFlyoverBridgeAdapter({
+  disableChecksum: true, // use EIP-55 checksummed addresses
+});
+```
+
+<ParamField body="options" type="RootstockFlyoverAdapterOptions">
+  Constructor options.
+
+  ```typescript
+  interface RootstockFlyoverAdapterOptions {
+    testnet?: boolean;            // default: false
+    providerIndex?: number;       // LP index, default: 0
+    minDepositSats?: bigint;      // override minimum deposit
+    captchaTokenResolver?: () => Promise<string>;
+    disableChecksum?: boolean;    // disable RSK address checksum — set true for EIP-55
+    preferNoCaptcha?: boolean;    // skip CAPTCHA LPs for CLI/agent use, default: true
+  }
+  ```
+</ParamField>
+
+### `adapter.getPegInPaymentPlan(amountSats, recipientRskAddress)`
+
+Fetch a quote from the LP, accept it, and return everything the agent needs to
+construct and broadcast the BTC payment. Preserve `quote` and `lpSignature` —
+they are needed if `registerPegIn` must be called manually as a recovery step.
+
+```typescript
+async getPegInPaymentPlan(
+  amountSats: bigint,
+  recipientRskAddress: string,
+): Promise<PegInPaymentPlan>
+```
+
+<ParamField body="amountSats" type="bigint" required>
+  Amount to bridge in satoshis. Must be between `FLYOVER_LIMITS.minPegInSats`
+  (`500_001n`) and `FLYOVER_LIMITS.maxPegInSats` (`1_500_000_000n`).
+</ParamField>
+
+<ParamField body="recipientRskAddress" type="string" required>
+  Rootstock (`0x…`) address to receive RBTC.
+</ParamField>
+
+#### `PegInPaymentPlan`
+
+<ResponseField name="depositAddress" type="string">
+  BTC address the agent must send to (Flyover LP derivation address).
+</ResponseField>
+<ResponseField name="amountSats" type="bigint">
+  Exact satoshi amount to send. Includes LP fees.
+</ResponseField>
+<ResponseField name="deadlineUnix" type="number">
+  Unix timestamp deadline. The BTC deposit must receive at least one
+  confirmation before this time or the quote expires.
+</ResponseField>
+<ResponseField name="quoteHash" type="string">
+  Quote identifier. Pass to `pollStatus()` or `getRegisterPegInInfo()`.
+</ResponseField>
+<ResponseField name="lpSignature" type="string">
+  LP commitment signature. Preserve this — required as argument to
+  `registerPegin()` in the recovery path.
+</ResponseField>
+<ResponseField name="bitcoinDepositAddressHash" type="string">
+  Hash of the BTC deposit address. Required for `validatePegInTransaction()`.
+</ResponseField>
+<ResponseField name="quote" type="Quote">
+  Full quote object from the LP. Required for `getRegisterPegInInfo()` and
+  `registerPegin()`.
+</ResponseField>
+<ResponseField name="lbcAddress" type="string">
+  LBC contract address on Rootstock (informational).
+</ResponseField>
+<ResponseField name="requiredBtcConfirmations" type="number">
+  Number of BTC confirmations the LP requires before acting.
+</ResponseField>
+<ResponseField name="fees" type="object">
+  Wei-denominated fee breakdown.
+
+  <Expandable title="fees fields">
+    <ResponseField name="valueWei" type="bigint">Net amount being bridged (wei).</ResponseField>
+    <ResponseField name="callFeeWei" type="bigint">LP service fee (wei).</ResponseField>
+    <ResponseField name="gasFeeWei" type="bigint">Gas fee (wei).</ResponseField>
+    <ResponseField name="penaltyFeeWei" type="bigint">Penalty fee the LP pays if they fail to deliver (wei).</ResponseField>
+    <ResponseField name="totalWei" type="bigint">Total: valueWei + callFeeWei + gasFeeWei (wei).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### `adapter.validatePegInTransaction(plan, rawBtcTxHex)`
+
+Validate a signed BTC transaction against the peg-in plan **before broadcasting**.
+Returns an empty string if valid, or a human-readable error message if invalid.
+
+```typescript
+async validatePegInTransaction(
+  plan: PegInPaymentPlan,
+  rawBtcTxHex: string,
+): Promise<string>
+```
+
+<ParamField body="plan" type="PegInPaymentPlan" required>The peg-in plan.</ParamField>
+<ParamField body="rawBtcTxHex" type="string" required>
+  Raw hex-encoded BTC transaction. The SDK checks that the output sends the
+  correct amount to the correct deposit address.
+</ParamField>
+
+Returns `""` (empty string) on success, or a descriptive error message on failure.
+
+---
+
+### `adapter.getRegisterPegInInfo(plan, userBtcTxHash)`
+
+Assemble the parameters needed to call `registerPegin` on the LBC contract as a
+recovery step. Only needed if the LP does not register the peg-in automatically.
+
+```typescript
+getRegisterPegInInfo(
+  plan: PegInPaymentPlan,
+  userBtcTxHash: string,
+): RegisterPegInInfo
+```
+
+#### `RegisterPegInInfo`
+
+```typescript
+interface RegisterPegInInfo {
+  lbcAddress: string;      // LBC contract — RSK tx recipient
+  valueRbtc: bigint;        // always 0n — registerPegin is nonpayable
+  quote: Quote;             // quote for the first registerPegin argument
+  lpSignature: string;      // LP signature for the second argument
+  userBtcTxHash: string;    // BTC txid — used to look up the SPV proof
+}
+```
+
+---
+
+### `adapter.registerPegIn(plan, userBtcTxHash)`
+
+Recovery path: call `registerPegin` on the LBC contract directly. Requires both
+`connectToBitcoin()` and `connectToRsk()` (with a signer) to have been called
+first. The SDK fetches the BTC SPV proof automatically.
+
+```typescript
+async registerPegIn(
+  plan: PegInPaymentPlan,
+  userBtcTxHash: string,
+): Promise<string>
+```
+
+---
+
+### `adapter.getPegoutQuote(amountSats, btcRecipientAddress, rskRefundAddress)`
+
+Fetch and accept a peg-out quote (RBTC → BTC).
+
+```typescript
+async getPegoutQuote(
+  amountSats: bigint,
+  btcRecipientAddress: string,
+  rskRefundAddress: string,
+): Promise<RootstockPegoutQuoteResult>
+```
+
+#### `RootstockPegoutQuoteResult`
+
+```typescript
+interface RootstockPegoutQuoteResult {
+  quote: PegoutQuote;
+  acceptedQuote: AcceptedPegoutQuote;
+  quoteHash: string;
+  totalAmountWei: bigint;
+  totalAmountSats: bigint;
+  lbcAddress: string;
+  signature: string;
+}
+```
+
+---
+
+### `adapter.depositPegout(quote, signature, amountWei?)`
+
+Deposit RBTC into the LBC contract to initiate the peg-out.
+
+```typescript
+async depositPegout(
+  quote: PegoutQuote,
+  signature: string,
+  amountWei?: bigint,
+): Promise<string>
+```
+
+---
+
+### `adapter.pollStatus(quoteHash)`
+
+Poll the peg-in status by quote hash. Returns a `BridgeStatusResult` with a
+normalised status string.
+
+```typescript
+async pollStatus(quoteHash: string): Promise<BridgeStatusResult>
+```
+
+Status values: `"pending"`, `"confirming"`, `"minting"`, `"completed"`,
+`"failed"`.
+
+---
+
+### Constants
+
+```typescript
+/** LBC contract addresses by network (v2.0.1). */
+const FLYOVER_LBC_ADDRESS = {
+  mainnet: "0xaa9caf1e3967600578727f975f283446a3da6612",
+  testnet: "0xc2a630c053d12d63d32b025082f6ba268db18300",
+} as const;
+
+/** Flyover protocol transfer limits. */
+const FLYOVER_LIMITS = {
+  minPegInSats:  500_001n,                       // 0.00500001 BTC
+  minPegOutWei:  4_000_000_000_000_000n,          // 0.004 rBTC
+  maxPegInSats:  1_500_000_000n,                  // 15 BTC
+  maxPegOutWei:  15_000_000_000_000_000_000n,     // 15 rBTC
+} as const;
+```
+
+---
+
+### Full Flyover peg-in example
+
+```typescript
+import { RootstockFlyoverBridgeAdapter } from "@peelbtc/sdk";
+
+const adapter = new RootstockFlyoverBridgeAdapter({
+  disableChecksum: true, // required for standard EIP-55 addresses
+});
+
+const plan = await adapter.getPegInPaymentPlan(
+  1_000_000n,   // 0.01 BTC in sats
+  "0xABCD...",  // recipient RSK address
+);
+
+console.log("Send BTC to:", plan.depositAddress);
+console.log("Amount (sats):", plan.amountSats.toString());
+console.log("Deadline:", new Date(plan.deadlineUnix * 1000).toISOString());
+console.log("Fees:", plan.fees);
+
+// Agent builds, signs, and broadcasts BTC tx via OWS
+
+// Optionally validate before broadcasting:
+// const err = await adapter.validatePegInTransaction(plan, unsignedHex);
+// if (err) throw new Error("Invalid tx: " + err);
+
+// Poll for completion
+const status = await adapter.pollStatus(plan.quoteHash);
+console.log("Bridge status:", status.status);
+```

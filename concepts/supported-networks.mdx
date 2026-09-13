@@ -1,0 +1,221 @@
+---
+title: "Supported Bitcoin Networks and L2s"
+sidebarTitle: "Networks"
+description: "Every chain Peel supports — Bitcoin L1, Stacks, BOB, Rootstock, and Citrea — with CAIP-2 IDs, RPC URLs, block times, and BTC asset details."
+---
+
+Peel supports Bitcoin L1 and four Bitcoin L2 networks. Every chain shares the same secp256k1 public key via [BRID identity derivation](/concepts/brid-identity) — one key produces a native address on each layer. When `routePayment` plans a route, it queries all five chains using the addresses derived from a single compressed pubkey.
+
+## Network summary
+
+| Network | CAIP-2 | Type | Native Asset | BTC Asset | Address Format | Avg Block Time |
+|---|---|---|---|---|---|---|
+| Bitcoin | `bip122:000000000019d6689c085ae165831e93` | L1 | BTC | BTC | P2WPKH bech32 | ~600s |
+| Bitcoin Testnet | `bip122:000000000933ea01ad0ee984209779ba` | L1 testnet | BTC | BTC | P2WPKH bech32 | ~600s |
+| Stacks | `stacks:1` | L2 anchored | STX | sBTC (SIP-010) | c32check | ~600s |
+| Stacks Testnet | `stacks:2147483648` | L2 testnet | STX | sBTC | c32check | ~600s |
+| BOB | `eip155:60808` | OP Stack L2 | ETH | tBTC (ERC-20) | EIP-55 | ~2s |
+| BOB Testnet | `eip155:808813` | L2 testnet | ETH | tBTC | EIP-55 | ~2s |
+| Rootstock | `eip155:30` | EVM sidechain | RBTC | RBTC (native) | EIP-55 | ~30s |
+| Rootstock Testnet | `eip155:31` | L2 testnet | tRBTC | tRBTC | EIP-55 | ~30s |
+| Citrea | `eip155:5115` | ZK rollup | cBTC | cBTC (native) | EIP-55 | ~2s |
+| Citrea Testnet | `eip155:5115` | L2 testnet | cBTC | cBTC | EIP-55 | ~2s |
+
+## Bitcoin L1
+
+Bitcoin L1 is the root of BRID identity and the funding source for all three bridge routes. Peel uses the [mempool.space](https://mempool.space) API for balance lookups, UTXO queries, fee estimates, and transaction broadcast.
+
+<CardGroup cols={2}>
+  <Card title="Address format" icon="at">
+    P2WPKH native SegWit (BIP-84). Mainnet addresses start with `bc1q`; testnet with `tb1q`. Derived from `RIPEMD160(SHA256(pubkey))` → bech32 with witness version 0.
+  </Card>
+  <Card title="Block time" icon="clock">
+    ~600 seconds (10 minutes) target. Peel uses mempool.space fee estimates for current sat/vB rates and recommended confirmation targets.
+  </Card>
+  <Card title="Transaction model" icon="database">
+    UTXO-based. Peel returns unsigned UTXO transaction data — UTXO selection, signing, and broadcast are handled by OWS or your own signer.
+  </Card>
+  <Card title="Testnet" icon="flask">
+    Bitcoin Testnet. Testnet faucet: [coinfaucet.eu/en/btc-testnet](https://coinfaucet.eu/en/btc-testnet/). Set `testnet: true` when deriving addresses.
+  </Card>
+</CardGroup>
+
+```typescript
+// Bitcoin network config from @peelbtc/core
+{
+  id: "bitcoin",
+  name: "Bitcoin",
+  caip2: "bip122:000000000019d6689c085ae165831e93",
+  nativeAsset: "BTC",
+  rpcUrl: "https://mempool.space/api",
+  explorerUrl: "https://mempool.space",
+  addressFormat: "p2wpkh",
+  avgBlockTimeSecs: 600,
+}
+```
+
+## Stacks
+
+Stacks is a Bitcoin L2 whose blocks are cryptographically anchored to Bitcoin. Every Stacks block commits to a Bitcoin block, giving sBTC transfers the same effective finality as Bitcoin (~10 minutes). Peel uses the [Hiro API](https://api.hiro.so) for Stacks.
+
+<CardGroup cols={2}>
+  <Card title="Address format" icon="at">
+    c32check encoding. Mainnet addresses start with `SP`; testnet with `ST`. The underlying hash160 is **identical** to the Bitcoin address from the same key — only the encoding differs.
+  </Card>
+  <Card title="BTC asset" icon="bitcoin">
+    sBTC — a SIP-010 fungible token backed 1:1 by BTC locked on Bitcoin L1 via the sBTC decentralised peg protocol. Contract: `SP3FBR2AGK5H9QBDH3EEN6DF8EK8JY7RX8QJ5SVTE.sbtc-token`
+  </Card>
+  <Card title="Signing" icon="key">
+    Stacks transactions use the same secp256k1 curve as Bitcoin. OWS signs Stacks transactions using the `--chain bitcoin` signer — no separate key material required.
+  </Card>
+  <Card title="Testnet" icon="flask">
+    Stacks Testnet. API: `https://api.testnet.hiro.so`. Explorer: `https://explorer.hiro.so/?chain=testnet`. Faucet available via Hiro Platform.
+  </Card>
+</CardGroup>
+
+```typescript
+// Stacks network config from @peelbtc/core
+{
+  id: "stacks",
+  name: "Stacks",
+  caip2: "stacks:1",
+  nativeAsset: "STX",
+  rpcUrl: "https://api.hiro.so",
+  explorerUrl: "https://explorer.hiro.so",
+  addressFormat: "c32check",
+  avgBlockTimeSecs: 600, // anchored to Bitcoin — effective finality ~10 min
+}
+```
+
+## BOB (Build on Bitcoin)
+
+BOB is an OP Stack L2 built on Bitcoin. Its native gas asset is ETH; BTC is bridged in as tBTC v2 via the Threshold Network. BOB produces blocks every ~2 seconds; full Optimistic Rollup finality follows the OP challenge period (~7 days on mainnet).
+
+<CardGroup cols={2}>
+  <Card title="Address format" icon="at">
+    EIP-55 checksummed hex (`0x...`). Same address as Rootstock and Citrea — all three EVM layers share the same derivation rule from the secp256k1 key.
+  </Card>
+  <Card title="BTC asset" icon="bitcoin">
+    tBTC (ERC-20) — Threshold Network's tBTC v2 protocol. Contract on BOB mainnet: `0xBBa2eF945D523C4e2608C9E1214C2Cc64D4fc2e2`. 18 decimals.
+  </Card>
+  <Card title="Transaction type" icon="receipt">
+    EIP-1559 (type 2). Gas is paid in ETH. Peel's `prepareBobTx` builds type-2 transactions automatically.
+  </Card>
+  <Card title="Testnet" icon="flask">
+    BOB Testnet. RPC: `https://testnet.rpc.gobob.xyz`. Explorer: `https://testnet-explorer.gobob.xyz`. Faucet via BOB docs.
+  </Card>
+</CardGroup>
+
+```typescript
+// BOB network config from @peelbtc/core
+{
+  id: "bob",
+  name: "BOB",
+  caip2: "eip155:60808",
+  nativeAsset: "ETH",
+  rpcUrl: "https://rpc.gobob.xyz",
+  explorerUrl: "https://explorer.gobob.xyz",
+  addressFormat: "eip55",
+  avgBlockTimeSecs: 2,
+}
+```
+
+## Rootstock
+
+Rootstock is an EVM-compatible sidechain that is merge-mined with Bitcoin. Its native asset is RBTC, pegged 1:1 to BTC via the RSK Federation two-way peg. Rootstock uses legacy type-0 transactions with EIP-155 replay protection applied automatically by Peel.
+
+<CardGroup cols={2}>
+  <Card title="Address format" icon="at">
+    EIP-55 checksummed hex (`0x...`). Same 20-byte address as BOB and Citrea from the same key.
+  </Card>
+  <Card title="BTC asset" icon="bitcoin">
+    RBTC — the native gas asset. No contract address; transferred as native value. 1:1 peg with BTC via RSK Federation merge-mining. 18 decimals (EVM convention).
+  </Card>
+  <Card title="Transaction type" icon="receipt">
+    Legacy type-0 with EIP-155 `v` value applied automatically. Peel's `prepareRootstockTx` handles this — no manual chain ID management required.
+  </Card>
+  <Card title="Testnet" icon="flask">
+    Rootstock Testnet. RPC: `https://public-node.testnet.rsk.co`. Explorer: `https://explorer.testnet.rsk.co`. Native asset: tRBTC. Faucet at faucet.rootstock.io.
+  </Card>
+</CardGroup>
+
+```typescript
+// Rootstock network config from @peelbtc/core
+{
+  id: "rootstock",
+  name: "Rootstock",
+  caip2: "eip155:30",
+  nativeAsset: "RBTC",
+  rpcUrl: "https://public-node.rsk.co",
+  explorerUrl: "https://explorer.rsk.co",
+  addressFormat: "eip55",
+  avgBlockTimeSecs: 30,
+}
+```
+
+## Citrea
+
+Citrea is Bitcoin's first ZK rollup. BTC is locked on Bitcoin L1 via the Clementine bridge (a BitVM2-based ZK-proven design) and minted 1:1 as cBTC — the native gas asset — on Citrea. Blocks finalize in ~2 seconds with ZK proof validity enforced on Bitcoin.
+
+<CardGroup cols={2}>
+  <Card title="Address format" icon="at">
+    EIP-55 checksummed hex (`0x...`). Same address as BOB and Rootstock from the same key.
+  </Card>
+  <Card title="BTC asset" icon="bitcoin">
+    cBTC — the native gas asset. Backed by BTC locked via the Clementine bridge with ZK proofs. No contract address; transferred as native value. 18 decimals.
+  </Card>
+  <Card title="Transaction type" icon="receipt">
+    EIP-1559 (type 2). Gas paid in cBTC. `prepareCitreaTx` builds type-2 transactions automatically.
+  </Card>
+  <Card title="Bridge support" icon="link">
+    Citrea supports **direct transfers** when the sender already holds cBTC. A programmable peg-in bridge is planned for a future Peel release.
+  </Card>
+</CardGroup>
+
+```typescript
+// Citrea network config from @peelbtc/core
+{
+  id: "citrea",
+  name: "Citrea",
+  caip2: "eip155:5115",
+  nativeAsset: "cBTC",
+  rpcUrl: "https://rpc.mainnet.citrea.xyz",
+  explorerUrl: "https://explorer.citrea.xyz",
+  addressFormat: "eip55",
+  avgBlockTimeSecs: 2,
+}
+```
+
+## Querying the network registry
+
+The full `NETWORKS` registry is available from `@peelbtc/core`. Use the typed helpers to iterate over supported chains at runtime:
+
+```typescript
+import {
+  getMainnetNetworks,
+  getTestnetNetworks,
+  getNetwork,
+  NETWORKS,
+} from "@peelbtc/core";
+
+// All mainnet chains
+const mainnets = getMainnetNetworks();
+// [bitcoin, stacks, bob, rootstock, citrea]
+
+// All testnet chains
+const testnets = getTestnetNetworks();
+// [bitcoin-testnet, stacks-testnet, bob-testnet, rootstock-testnet, citrea-testnet]
+
+// Single chain lookup by CAIP-2 id
+import { Caip2 } from "@peelbtc/types";
+const rootstock = getNetwork(Caip2.RootstockMainnet);
+// { id: "rootstock", nativeAsset: "RBTC", avgBlockTimeSecs: 30, ... }
+```
+
+<Tip>
+  Use `getMainnetNetworks()` and `getTestnetNetworks()` instead of importing `NETWORKS` directly. The helpers return `NetworkConfig[]` arrays that are easy to iterate, filter, and pass to balance queries — and they automatically include any new networks added in future Peel releases.
+</Tip>
+
+<Warning>
+  The `rpcUrl` values in the registry are public endpoints suitable for development and low-volume use. For production deployments, override `rpcUrl` with a dedicated node or RPC provider (QuickNode, Alchemy, Hiro Platform, etc.) to avoid rate limits.
+</Warning>

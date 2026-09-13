@@ -1,0 +1,562 @@
+---
+title: "routePayment() — Peel Routing Engine Reference"
+sidebarTitle: "routePayment()"
+description: "Full API reference for routePayment(). Resolves the best cross-chain payment route from a RouteIntent and returns an ordered RoutePlan for agent execution."
+---
+
+`routePayment` is the core Peel abstraction. You describe a payment intent — who is sending, where it goes, and how much in satoshis — and the engine returns a fully resolved execution plan. The plan is an ordered list of self-contained steps the agent executes using the other SDK functions. The engine never moves funds itself; it only decides and plans.
+
+```typescript
+import { routePayment } from "@peelbtc/sdk";
+
+const plan = await routePayment({
+  from: identity,       // BridIdentityMap from @peelbtc/core
+  to: "SP1ABC...",      // destination — any chain, any format
+  amountSats: 100_000n, // always in satoshis
+});
+
+// plan.intent — the resolved routing decision
+// plan.steps  — ordered list of steps to execute
+```
+
+---
+
+## Function signature
+
+```typescript
+function routePayment(intent: RouteIntent): Promise<RoutePlan>
+```
+
+---
+
+## Parameters
+
+### `RouteIntent`
+
+<ParamField body="from" type="BridIdentityMap" required>
+  The source wallet. A `BridIdentityMap` produced by `buildBridIdentityMap()` in
+  `@peelbtc/core`. Provides the sender's addresses on all layers and is used for
+  balance-based route scoring.
+</ParamField>
+
+<ParamField body="to" type="string" required>
+  Destination address in any supported format: Bitcoin (`bc1q…`, `bc1p…`, `1…`,
+  `3…`), Stacks (`SP…`), or EVM (`0x…`). For `0x…` addresses with multiple
+  possible destination chains, supply `destinationChain` to disambiguate.
+</ParamField>
+
+<ParamField body="amountSats" type="bigint" required>
+  Amount to route, always expressed in satoshis regardless of the destination
+  chain or asset. The engine converts internally as needed.
+</ParamField>
+
+<ParamField body="destinationChain" type='"bob" | "rootstock" | "citrea"'>
+  Required when `to` is a `0x…` EVM address and you want to route to a specific
+  chain. Skips the receiver-activity heuristic and forces routing to the
+  specified chain. If omitted for an EVM address, the engine uses the receiver's
+  live on-chain balances to choose the best destination.
+</ParamField>
+
+<ParamField body="preferredBridge" type='"flyover" | "sbtc" | "bob-gateway"'>
+  Prefer a specific bridge when multiple options are available. The engine still
+  scores all candidates — this acts as a tiebreaker that selects the named
+  bridge from the top-scored candidates, not a hard filter.
+</ParamField>
+
+<ParamField body="maxBridgeFeeSats" type="bigint">
+  Exclude bridge routes where the estimated fee exceeds this value (in
+  satoshis). Routes that exceed this constraint are eliminated before scoring.
+</ParamField>
+
+<ParamField body="maxTimeSecs" type="number">
+  Exclude routes whose estimated settlement time exceeds this value (in
+  seconds). Routes that exceed this constraint are eliminated before scoring.
+</ParamField>
+
+<ParamField body="scoreWeights" type="Partial<ScoreWeights>">
+  Override the default scoring weights. Values are relative — the engine
+  normalises them internally so they do not need to sum to 100.
+
+  ```typescript
+  scoreWeights: {
+    senderBalance:    35, // prefer sender's most liquid BTC asset
+    receiverActivity: 25, // prefer chains where receiver is most active
+    feeRate:          25, // prefer cheaper routes
+    settlementTime:   15, // prefer faster routes
+  }
+  ```
+</ParamField>
+
+<ParamField body="memo" type="string">
+  A human-readable note embedded alongside the Peel marker in the transaction.
+  Maximum 13 bytes UTF-8 (constrained by the 34-byte Stacks memo field limit).
+  Truncated silently if longer. The full Peel memo binary layout is:
+  `PEEL(4) | version(1) | intentId(16) | userMemo(0–13)`.
+</ParamField>
+
+<ParamField body="onIntentResolved" type="(intent: ResolvedIntent) => Promise<void>">
+  Optional telemetry hook called with the fully resolved intent after scoring
+  but before the plan is returned. The engine makes no network calls of its own
+  with this data — the caller controls where it goes (logging, server, analytics).
+
+  ```typescript
+  onIntentResolved: async (intent) => {
+    console.log("route:", intent.route, intent.bridge ?? "direct");
+    console.log("fee:", intent.estimatedFeeSats, "sats");
+    console.log("time:", intent.estimatedTimeSecs, "seconds");
+  }
+  ```
+</ParamField>
+
+---
+
+## Return type
+
+### `RoutePlan`
+
+<ResponseField name="intent" type="ResolvedIntent">
+  The fully resolved routing decision. Contains the winning route, estimated
+  fees, network liveness results, and all scored candidates for transparency.
+</ResponseField>
+
+<ResponseField name="steps" type="RouteStep[]">
+  Ordered list of execution steps. Each step is self-contained — it has
+  everything the agent needs to act. Steps must be executed in order.
+</ResponseField>
+
+---
+
+### `ResolvedIntent`
+
+<ResponseField name="id" type="string">
+  UUID v4 per routing decision, generated fresh on each call. Embedded in every
+  Peel memo so that all on-chain transactions from this plan share the same
+  intent ID. Also available as `step.peelMemo.intentId`.
+</ResponseField>
+
+<ResponseField name="resolvedAt" type="number">
+  Unix timestamp (milliseconds) when the intent was resolved.
+</ResponseField>
+
+<ResponseField name="sourceLayer" type="NetworkLayer">
+  The layer the payment originates from: `"bitcoin" | "stacks" | "bob" | "rootstock" | "citrea"`.
+</ResponseField>
+
+<ResponseField name="destinationLayer" type="NetworkLayer">
+  The layer the payment is being routed to.
+</ResponseField>
+
+<ResponseField name="destinationAddress" type="string">
+  The destination address as supplied in the intent.
+</ResponseField>
+
+<ResponseField name="amountSats" type="bigint">
+  Amount being routed, in satoshis. Mirrors `intent.amountSats`.
+</ResponseField>
+
+<ResponseField name="route" type='"direct" | "bridge"'>
+  Whether this is a same-chain direct transfer or a cross-chain bridge route.
+</ResponseField>
+
+<ResponseField name="bridge" type="BridgeName | undefined">
+  The bridge chosen when `route` is `"bridge"`. One of `"flyover"`, `"sbtc"`,
+  or `"bob-gateway"`. Undefined for direct routes.
+</ResponseField>
+
+<ResponseField name="estimatedFeeSats" type="bigint">
+  Total estimated fee for this route in satoshis, including bridge fees where
+  applicable.
+</ResponseField>
+
+<ResponseField name="estimatedTimeSecs" type="number">
+  Estimated time to full settlement in seconds. Direct transfers are near-instant;
+  bridge routes range from ~20 minutes (sBTC) to ~60 minutes (Flyover).
+</ResponseField>
+
+<ResponseField name="networkChecks" type="NetworkLivenessResult[]">
+  Liveness check results for every chain involved in candidate routes. Includes
+  alive status, latency, and block height for each layer.
+
+  <Expandable title="NetworkLivenessResult fields">
+    <ResponseField name="layer" type="NetworkLayer">
+      The layer that was checked.
+    </ResponseField>
+    <ResponseField name="alive" type="boolean">
+      Whether the chain responded within the timeout window.
+    </ResponseField>
+    <ResponseField name="latencyMs" type="number">
+      Round-trip latency in milliseconds.
+    </ResponseField>
+    <ResponseField name="blockHeight" type="string | undefined">
+      Current block height if available.
+    </ResponseField>
+    <ResponseField name="checkedAt" type="number">
+      Unix timestamp (ms) when the check was performed.
+    </ResponseField>
+    <ResponseField name="error" type="string | undefined">
+      Error message if the check failed.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="recipientHint" type="RecipientHint | undefined">
+  Populated for `0x…` EVM destinations. Contains the receiver's active EVM
+  layers sorted by BTC balance, and the single best chain to route to.
+
+  <Expandable title="RecipientHint fields">
+    <ResponseField name="activeLayers" type='Array<"bob" | "rootstock" | "citrea">'>
+      EVM chains where the recipient has a non-zero BTC-pegged balance, sorted
+      highest balance first.
+    </ResponseField>
+    <ResponseField name="preferredEvm" type='"bob" | "rootstock" | "citrea" | null'>
+      The EVM chain with the highest BTC-pegged balance. `null` if the recipient
+      has no detected BTC-pegged balance on any EVM chain.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="allCandidates" type="ScoredCandidate[]">
+  All candidate routes that survived liveness and constraint filtering, with
+  their scores and score breakdowns. Sorted highest score first. Use this for
+  transparency, debugging, or building your own selection UI.
+</ResponseField>
+
+---
+
+## Route steps
+
+Each element of `plan.steps` is a `RouteStep` — a discriminated union on the
+`type` field. Execute steps in order.
+
+### `BtcSendStep` — `type: "btc-send"`
+
+The agent constructs, signs, and broadcasts a Bitcoin UTXO transaction. Add
+`peelMemo` as a zero-value `OP_RETURN` output.
+
+```typescript
+interface BtcSendStep {
+  type: "btc-send";
+  from: string;         // sender Bitcoin address
+  to: string;           // recipient Bitcoin address
+  amountSats: bigint;
+  peelMemo: EncodedMemo; // embed as OP_RETURN output (value = 0)
+}
+```
+
+### `EvmTransferStep` — `type: "evm-transfer"`
+
+The agent calls the chain-specific prepare/sign/broadcast functions. For native
+transfers, embed `peelMemo` in the transaction `data` field.
+
+```typescript
+interface EvmTransferStep {
+  type: "evm-transfer";
+  chain: "bob" | "rootstock" | "citrea";
+  from: string;
+  to: string;
+  amountWei: bigint;
+  asset: "ETH" | "RBTC" | "cBTC" | "wBTC";
+  tokenContract?: string;  // present for ERC-20 transfers
+  peelMemo?: EncodedMemo;  // embed in tx data field for native transfers
+}
+```
+
+### `StacksTransferStep` — `type: "stacks-transfer"`
+
+The agent uses the Stacks tx pipeline (`buildStxTransfer` / `buildSbtcTransfer`,
+`prepareStacksTx`, `encodeStacksSignedTx`, `broadcastStacksTx`).
+
+```typescript
+interface StacksTransferStep {
+  type: "stacks-transfer";
+  from: string;          // Stacks address (SP... mainnet, ST... testnet)
+  to: string;
+  publicKey: string;     // 33-byte compressed pubkey hex (from OWS)
+  asset: "STX" | "sBTC";
+  amountSats: bigint;
+  peelMemo?: EncodedMemo; // present for STX; absent for sBTC SIP-010
+}
+```
+
+### `BridgeDepositStep` — `type: "bridge-deposit"`
+
+The agent calls the bridge-specific setup function to obtain a deposit address,
+then sends BTC to that address.
+
+```typescript
+interface BridgeDepositStep {
+  type: "bridge-deposit";
+  bridge: BridgeName;
+  from: string;
+  amountSats: bigint;
+  estimatedFeeSats: bigint;
+  estimatedTimeSecs: number;
+  params: SbtcDepositParams | FlyoverDepositParams | BobGatewayParams;
+  peelMemo: EncodedMemo;
+}
+```
+
+The `params` discriminated union tells you which bridge setup function to call:
+
+| `params.bridge` | Setup function |
+|---|---|
+| `"sbtc"` | `buildSbtcDepositPlan(params)` |
+| `"flyover"` | `adapter.getPegInPaymentPlan(params.amountSats, params.recipientRskAddress)` |
+| `"bob-gateway"` | `gateway-cli swap --src BTC --dst ETH:bob --unsigned` |
+
+### `BridgeNotifyStep` — `type: "bridge-notify"`
+
+sBTC peg-in only. After the BTC deposit transaction is broadcast, fetch the raw
+transaction hex from mempool.space and call `notifySbtcDeposit(plan, txHex)`.
+This notifies the sBTC Signers network.
+
+```typescript
+interface BridgeNotifyStep {
+  type: "bridge-notify";
+  bridge: "sbtc";
+}
+```
+
+### `SbtcWithdrawalStep` — `type: "sbtc-withdrawal"`
+
+sBTC peg-out (Stacks → Bitcoin). Call `prepareSbtcWithdrawalTx`, sign with OWS,
+and broadcast via `broadcastStacksTx`.
+
+```typescript
+interface SbtcWithdrawalStep {
+  type: "sbtc-withdrawal";
+  from: string;          // Stacks address holding sBTC
+  publicKey: string;     // 33-byte compressed pubkey hex
+  btcRecipient: string;  // Bitcoin address to receive BTC
+  amountSats: bigint;
+  maxFeeSats: bigint;    // max fee for the Bitcoin sweep tx
+}
+```
+
+---
+
+## Score weights
+
+Each candidate route is scored 0–100. Higher wins. Two hard filters run first:
+liveness (dead chains eliminated) and constraints (`maxBridgeFeeSats`,
+`maxTimeSecs`). Then four weighted signals:
+
+```typescript
+interface ScoreWeights {
+  senderBalance: number;    // default 35 — prefer sender's most liquid BTC asset
+  receiverActivity: number; // default 25 — prefer chains where receiver is most active
+  feeRate: number;          // default 25 — prefer routes with lower total fees
+  settlementTime: number;   // default 15 — prefer routes that settle faster
+}
+
+const DEFAULT_SCORE_WEIGHTS: ScoreWeights = {
+  senderBalance: 35,
+  receiverActivity: 25,
+  feeRate: 25,
+  settlementTime: 15,
+};
+```
+
+<Tip>
+  Override individual weights using `scoreWeights: Partial<ScoreWeights>`.
+  Weights are normalised before scoring, so `{ feeRate: 100 }` makes fee the
+  only dimension without affecting the scale of other signals.
+</Tip>
+
+---
+
+## `EncodedMemo` and `encodePeelMemo()`
+
+Every step that touches a transaction includes a `peelMemo` field. The memo
+binds the on-chain transaction to the routing decision via `intentId`.
+
+```typescript
+interface EncodedMemo {
+  bytes: Uint8Array; // raw bytes: PEEL(4) | version(1) | intentId(16) | userMemo(0–13)
+  hex: string;       // lowercase hex, no 0x prefix
+  intentId: string;  // UUID — same as plan.intent.id
+}
+```
+
+You can encode a memo directly:
+
+```typescript
+import { encodePeelMemo, PEEL_MEMO_MAGIC, PEEL_MEMO_VERSION } from "@peelbtc/sdk";
+
+// intentId: UUID v4 string
+// userMemo: optional, truncated to 13 bytes UTF-8
+const memo = encodePeelMemo("550e8400-e29b-41d4-a716-446655440000", "invoice #42");
+// memo.hex   → "5045454c01550e8400e29b41d4a716446655440000696e766f696365202334..."
+// memo.bytes → Uint8Array(34)
+```
+
+How to embed the memo by transaction type:
+
+| Transaction type | Embedding method |
+|---|---|
+| Bitcoin | Extra `OP_RETURN` output, value = 0 sats, data = `peelMemo.bytes` |
+| EVM native transfer | Set tx `data` field to `"0x" + peelMemo.hex` |
+| STX transfer | Set `memo` field on the Stacks tx (34-byte limit — fits exactly) |
+| sBTC / ERC-20 | Omitted — calldata is occupied by the contract call |
+
+---
+
+## Supported routes
+
+| Source | Destination | Route type | Bridge |
+|---|---|---|---|
+| Any layer | Same layer | Direct transfer | None |
+| Bitcoin | Stacks | Bridge | sBTC peg-in |
+| Bitcoin | Rootstock | Bridge | Flyover peg-in |
+| Bitcoin | BOB | Bridge | BOB Gateway |
+| Stacks | Bitcoin | Bridge | sBTC peg-out |
+| Any L2 | Different L2 | ❌ Not supported in v1 | — |
+| Bitcoin | Citrea | ❌ No programmable bridge | — |
+
+<Note>
+  Citrea is supported as a **direct transfer destination** when the sender
+  already holds cBTC on Citrea, but there is no programmatic bridge route to
+  Citrea in v1.
+</Note>
+
+---
+
+## Code examples
+
+<CodeGroup>
+
+```typescript Bitcoin → Stacks (sBTC peg-in)
+import {
+  routePayment,
+  buildSbtcDepositPlan,
+  notifySbtcDeposit,
+  pollSbtcDepositStatus,
+} from "@peelbtc/sdk";
+
+const plan = await routePayment({
+  from: identity,
+  to: "SP1ABC...",
+  amountSats: 100_000n,
+});
+
+// plan.steps[0]: BridgeDepositStep  { bridge: "sbtc" }
+// plan.steps[1]: BridgeNotifyStep   { bridge: "sbtc" }
+
+const depositStep = plan.steps[0]; // BridgeDepositStep
+
+// Step 1: fetch deposit address from Emily API
+const sbtcPlan = await buildSbtcDepositPlan(depositStep.params);
+// sbtcPlan.depositAddress — send BTC here (add peelMemo as OP_RETURN)
+
+// Step 2: build, sign, and broadcast BTC tx via OWS
+// Include depositStep.peelMemo.hex as OP_RETURN output
+
+// Step 3: notify sBTC Signers (call once BTC tx is in mempool)
+const txHex = await fetch(
+  `https://mempool.space/api/tx/${txid}/hex`
+).then((r) => r.text());
+await notifySbtcDeposit(sbtcPlan, txHex);
+
+// Step 4: poll until sBTC is minted (~20 minutes)
+const status = await pollSbtcDepositStatus(txid);
+// status.status: "pending" | "confirmed" | "failed"
+```
+
+```typescript Bitcoin → Rootstock (Flyover peg-in)
+import { routePayment, RootstockFlyoverBridgeAdapter } from "@peelbtc/sdk";
+
+const plan = await routePayment({
+  from: identity,
+  to: "0xABCD...",
+  amountSats: 1_000_000n,
+  destinationChain: "rootstock",
+});
+
+const depositStep = plan.steps[0]; // BridgeDepositStep { bridge: "flyover" }
+const { recipientRskAddress, amountSats } = depositStep.params;
+
+const adapter = new RootstockFlyoverBridgeAdapter({ disableChecksum: true });
+const peginPlan = await adapter.getPegInPaymentPlan(amountSats, recipientRskAddress);
+// peginPlan.depositAddress — send BTC here
+// peginPlan.deadlineUnix, peginPlan.fees
+
+// Agent builds, signs, broadcasts BTC tx via OWS
+// Poll: adapter.pollStatus(peginPlan.quoteHash)
+```
+
+```typescript Stacks → Stacks (direct sBTC transfer)
+import {
+  routePayment,
+  buildSbtcTransfer,
+  prepareStacksTx,
+  encodeStacksSignedTx,
+  broadcastStacksTx,
+} from "@peelbtc/sdk";
+
+const plan = await routePayment({
+  from: identity,
+  to: "SP2DEF...",
+  amountSats: 50_000n,
+  memo: "gift",
+});
+
+const step = plan.steps[0]; // StacksTransferStep { asset: "sBTC" }
+
+const txRequest = buildSbtcTransfer(
+  step.from,
+  step.to,
+  step.amountSats,
+  step.publicKey,
+  false // mainnet
+);
+if (step.peelMemo) txRequest.memo = step.peelMemo.bytes;
+
+const prepared = await prepareStacksTx(txRequest);
+// Sign: ows sign tx --chain bitcoin --tx <prepared.preSignSigHash>
+const owsSig = { signature: "<hex r||s||v from OWS>" };
+
+const signedHex = encodeStacksSignedTx(prepared, owsSig);
+const txid = await broadcastStacksTx(signedHex, false);
+```
+
+```typescript Score weight overrides
+import { routePayment } from "@peelbtc/sdk";
+
+// Optimise purely for speed — useful for time-sensitive payments
+const plan = await routePayment({
+  from: identity,
+  to: "0xABCD...",
+  amountSats: 500_000n,
+  destinationChain: "bob",
+  scoreWeights: {
+    settlementTime: 80,  // prioritise fast settlement
+    feeRate: 20,         // small fee consideration
+    senderBalance: 0,    // ignore sender balance signal
+    receiverActivity: 0, // ignore receiver activity signal
+  },
+  maxTimeSecs: 3600,     // hard cap: reject routes > 1 hour
+});
+```
+
+</CodeGroup>
+
+---
+
+## Error conditions
+
+`routePayment` throws a descriptive `Error` in the following cases:
+
+| Condition | Error message |
+|---|---|
+| Sender has no balance on any chain that can reach the destination | `"no viable routes: sender has insufficient balance on any chain that can reach the destination"` |
+| All candidate chains fail the liveness check | `"no viable routes: all candidate chains are unreachable (bitcoin, stacks)"` |
+| `destinationChain` is specified but no route to that chain exists | `"no route available to destinationChain \"rootstock\""` |
+| All routes violate `maxBridgeFeeSats` or `maxTimeSecs` | `"no route satisfies the constraints (maxBridgeFeeSats / maxTimeSecs too restrictive)"` |
+| Sender has no address on the winning source layer | `"sender has no address on bitcoin"` |
+
+<Warning>
+  Liveness checks time out after 5 seconds per chain. Temporarily unreachable
+  chains are eliminated as dead candidates. If the sender only holds BTC on an
+  unreachable chain, the call will throw. Use `onIntentResolved` to inspect
+  `networkChecks` before acting on the plan.
+</Warning>

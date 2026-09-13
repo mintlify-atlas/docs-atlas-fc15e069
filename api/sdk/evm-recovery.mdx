@@ -1,0 +1,294 @@
+---
+title: "EVM Recipient Identity Recovery Reference"
+sidebarTitle: "EVM Recovery"
+description: "Recover a full BRID identity or compressed public key from any 0x EVM address using ECDSA recovery from on-chain signed transactions."
+---
+
+The EVM recovery functions derive a recipient's full multi-chain identity from
+their `0x…` address — without any interaction from them. The technique relies on
+the fact that every signed EVM transaction contains an ECDSA signature from
+which the sender's compressed secp256k1 public key can be mathematically
+recovered. From that public key, the BRID derivation in `@peelbtc/core` produces
+the complete identity map covering Bitcoin, Stacks, BOB, Rootstock, and Citrea.
+
+These functions live in `@peelbtc/sdk` (not `@peelbtc/core`) because they
+require `viem` for EVM transaction parsing and public key recovery.
+
+```typescript
+import {
+  recoverEvmRecipientIdentity,
+  recoverPublicKeyFromEvmAddress,
+} from "@peelbtc/sdk";
+```
+
+---
+
+## `recoverEvmRecipientIdentity`
+
+Recover the full BRID identity map for an EVM recipient from their on-chain
+address.
+
+```typescript
+async function recoverEvmRecipientIdentity(
+  address: string,
+  options: EvmRecoveryOptions,
+): Promise<BridIdentityMap | null>
+```
+
+Returns `null` if the address has no signed transaction history.
+
+<ParamField body="address" type="string" required>
+  The EVM address (`0x…`) to recover the identity for.
+</ParamField>
+
+<ParamField body="options" type="EvmRecoveryOptions" required>
+  Recovery configuration. See the `EvmRecoveryOptions` section below.
+</ParamField>
+
+**Return type:** `Promise<BridIdentityMap | null>`
+
+On success, returns a `BridIdentityMap` with:
+- `publicKey` — recovered 33-byte compressed secp256k1 public key
+- `root` — Bitcoin address derived from the pubkey
+- `derived` — array of addresses for all five layers (bitcoin, stacks, bob,
+  rootstock, citrea)
+
+Returns `null` if no signed transaction is found, or if recovery fails for any reason.
+
+---
+
+## `recoverPublicKeyFromEvmAddress`
+
+Recover only the compressed secp256k1 public key from an EVM address, without
+building the full identity map.
+
+```typescript
+async function recoverPublicKeyFromEvmAddress(
+  address: string,
+  options: EvmRecoveryOptions,
+): Promise<Uint8Array | null>
+```
+
+Returns `null` if no signed transaction is found or recovery fails.
+
+<ParamField body="address" type="string" required>
+  The EVM address (`0x…`) to recover the public key for.
+</ParamField>
+
+<ParamField body="options" type="EvmRecoveryOptions" required>
+  Recovery configuration. See `EvmRecoveryOptions` below.
+</ParamField>
+
+**Return type:** `Promise<Uint8Array | null>`
+
+Returns a 33-byte `Uint8Array` containing the compressed secp256k1 public key
+(prefix `02` or `03` followed by 32 bytes of x-coordinate), or `null`.
+
+---
+
+## `EvmRecoveryOptions`
+
+```typescript
+interface EvmRecoveryOptions {
+  evmChain?: EvmChain;           // "bob" | "rootstock" | "citrea", default: "bob"
+  evmExplorerApiUrl?: string;    // Blockscout API base URL (fast path)
+  evmRpcUrl?: string;            // override RPC endpoint
+  evmMaxBlockScan?: number;      // fallback block scan limit, default: 100
+  testnet?: boolean;             // use testnet endpoints, default: false
+}
+
+type EvmChain = "bob" | "rootstock" | "citrea";
+```
+
+<ParamField body="evmChain" type='"bob" | "rootstock" | "citrea"'>
+  The EVM chain to query for transaction history. Determines which RPC endpoint
+  and chain ID to use. Default: `"bob"`.
+</ParamField>
+
+<ParamField body="evmExplorerApiUrl" type="string">
+  Blockscout-compatible explorer API base URL. When provided, the function
+  queries the Blockscout v2 API (`/api/v2/addresses/{address}/transactions`)
+  to find a transaction in a single HTTP request — much faster than block
+  scanning. **Strongly recommended for production use.**
+</ParamField>
+
+<ParamField body="evmRpcUrl" type="string">
+  Override the RPC endpoint URL. If omitted, uses the viem chain default for
+  the selected `evmChain`.
+</ParamField>
+
+<ParamField body="evmMaxBlockScan" type="number">
+  Maximum number of recent blocks to scan when no `evmExplorerApiUrl` is
+  provided. Default: `100`. Higher values increase the chance of finding a
+  transaction for low-activity addresses, but are slower.
+</ParamField>
+
+<ParamField body="testnet" type="boolean">
+  Use testnet endpoints and derive testnet addresses. Default: `false`.
+</ParamField>
+
+---
+
+## Explorer API URLs
+
+| Chain | Mainnet explorer API |
+|---|---|
+| BOB | `https://explorer.gobob.xyz` |
+| Rootstock | `https://explorer.rootstock.io` |
+| Citrea | `https://explorer.mainnet.citrea.xyz` |
+
+<Tip>
+  Always provide `evmExplorerApiUrl` when possible. The block-scan fallback
+  scans backwards from the latest block, which is slow and may miss older
+  transactions if the address has not been active in the last `evmMaxBlockScan`
+  blocks.
+</Tip>
+
+---
+
+## How it works
+
+The recovery pipeline runs in two stages:
+
+**Stage 1 — Find a transaction**
+
+The function searches for any transaction sent *from* the target address. It
+tries the fast path first:
+
+1. **Blockscout API** (if `evmExplorerApiUrl` is set): queries
+   `/api/v2/addresses/{address}/transactions?filter=from&page=1&page_size=1`
+   — a single HTTP request to get the most recent outbound transaction hash.
+
+2. **Block scan fallback** (if no explorer URL or if the API returns nothing):
+   walks backwards from the latest block using `eth_getBlockByNumber`, checking
+   each transaction's `from` field. Stops after `evmMaxBlockScan` blocks.
+
+**Stage 2 — Recover the public key**
+
+Once a transaction hash is found:
+
+1. Fetches the raw signed transaction via `eth_getRawTransactionByHash`.
+2. Parses it with viem's `parseTransaction` to extract `r`, `s`, `v`.
+3. Reconstructs the unsigned transaction payload (removes `r`, `s`, `v`).
+4. Computes `keccak256` of the serialized unsigned payload to get the signing
+   hash.
+5. Calls viem's `recoverPublicKey` with the signing hash and signature to
+   recover the uncompressed 65-byte public key.
+6. Compresses it to 33 bytes using the point's y-coordinate parity.
+
+The compressed pubkey is then passed to `buildIdentityFromPublicKey` in
+`@peelbtc/core` to derive all layer addresses.
+
+---
+
+## Limitation
+
+<Warning>
+  Returns `null` for addresses that have **never sent a transaction**. Public
+  key recovery requires a signed transaction — receiving funds only does not
+  reveal the public key. Contract addresses and fresh wallets will always return
+  `null`.
+</Warning>
+
+---
+
+## Code examples
+
+<CodeGroup>
+
+```typescript Full identity recovery (BOB)
+import { recoverEvmRecipientIdentity } from "@peelbtc/sdk";
+
+const identity = await recoverEvmRecipientIdentity(
+  "0x2935C2...",
+  {
+    evmChain: "bob",
+    evmExplorerApiUrl: "https://explorer.gobob.xyz",
+  }
+);
+
+if (!identity) {
+  console.log("No transaction history — cannot recover identity");
+} else {
+  console.log("Public key:", Buffer.from(identity.publicKey).toString("hex"));
+  console.log("Bitcoin address:", identity.root);
+
+  for (const derived of identity.derived) {
+    console.log(`${derived.layer}: ${derived.address}`);
+  }
+  // bitcoin:   bc1q...
+  // stacks:    SP...
+  // bob:       0x...
+  // rootstock: 0x...
+  // citrea:    0x...
+}
+```
+
+```typescript Public key only (Rootstock)
+import { recoverPublicKeyFromEvmAddress } from "@peelbtc/sdk";
+
+const pubkey = await recoverPublicKeyFromEvmAddress(
+  "0xABCD...",
+  {
+    evmChain: "rootstock",
+    evmExplorerApiUrl: "https://explorer.rootstock.io",
+  }
+);
+
+if (pubkey) {
+  console.log("Recovered pubkey (hex):", Buffer.from(pubkey).toString("hex"));
+  // Uint8Array(33) — compressed secp256k1 pubkey
+} else {
+  console.log("No signed transactions found");
+}
+```
+
+```typescript Block scan fallback (no explorer)
+import { recoverEvmRecipientIdentity } from "@peelbtc/sdk";
+
+// Slower but works without an explorer API
+const identity = await recoverEvmRecipientIdentity(
+  "0x1234...",
+  {
+    evmChain: "citrea",
+    evmRpcUrl: "https://rpc.mainnet.citrea.xyz",
+    evmMaxBlockScan: 500, // scan up to 500 recent blocks
+  }
+);
+```
+
+```typescript Use recovered identity with routePayment
+import {
+  recoverEvmRecipientIdentity,
+  routePayment,
+} from "@peelbtc/sdk";
+
+// Recover the recipient's full identity from their 0x address
+const recipientIdentity = await recoverEvmRecipientIdentity(
+  "0xRECIPIENT...",
+  {
+    evmChain: "bob",
+    evmExplorerApiUrl: "https://explorer.gobob.xyz",
+  }
+);
+
+if (!recipientIdentity) {
+  throw new Error("Recipient has no transaction history");
+}
+
+// Route a payment using recovered destination addresses
+// e.g. pay their Stacks address with sBTC instead
+const stacksAddress = recipientIdentity.derived.find(
+  (d) => d.layer === "stacks"
+)?.address;
+
+if (stacksAddress) {
+  const plan = await routePayment({
+    from: senderIdentity,
+    to: stacksAddress,
+    amountSats: 100_000n,
+  });
+}
+```
+
+</CodeGroup>

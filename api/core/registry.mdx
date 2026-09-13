@@ -1,0 +1,353 @@
+---
+title: "Network and Asset Registry Reference"
+sidebarTitle: "Registry"
+description: "Static CAIP-2 network configs and asset configs for all chains supported by Peel: Bitcoin, Stacks, BOB, Rootstock, and Citrea."
+---
+
+The registry in `@peelbtc/core` is a static, tree-shakeable record of every chain and asset Peel knows about. It exports a typed `NETWORKS` map keyed by CAIP-2 identifier, an `ASSETS` array covering native and bridged BTC assets, and a set of lookup helpers for filtering by testnet status, network, or symbol. Nothing here makes network calls — the registry is compile-time constant data that adapters, routing code, and user interfaces can rely on without fetching anything.
+
+---
+
+## Network registry
+
+### `NETWORKS`
+
+A frozen, exhaustive map from every `Caip2` enum value to its `NetworkConfig`. Look up any chain config in O(1).
+
+```typescript
+const NETWORKS: Readonly<Record<Caip2, NetworkConfig>>
+```
+
+```typescript
+import { NETWORKS } from "@peelbtc/core";
+import { Caip2 } from "@peelbtc/types";
+
+const bitcoin = NETWORKS[Caip2.BitcoinMainnet];
+// { id: "bitcoin", name: "Bitcoin", caip2: "bip122:000...", ... }
+```
+
+<Note>
+The public RPC URLs in `NETWORKS` are suitable for development and low-volume use. In production, override `rpcUrl` by passing your own endpoint to any adapter that accepts `RpcOverrides`.
+</Note>
+
+---
+
+### `getNetwork`
+
+Returns the `NetworkConfig` for a given CAIP-2 identifier.
+
+```typescript
+function getNetwork(caip2: Caip2): NetworkConfig
+```
+
+<ParamField path="caip2" type="Caip2" required>
+  A value from the `Caip2` enum (e.g. `Caip2.StacksMainnet`). Returns `undefined` for an unrecognized value — TypeScript prevents this at compile time when using the enum.
+</ParamField>
+
+---
+
+### `getMainnetNetworks`
+
+Returns an array of `NetworkConfig` for all mainnet chains.
+
+```typescript
+function getMainnetNetworks(): NetworkConfig[]
+```
+
+**Return value:** All `NetworkConfig` entries where `testnet === false`. Currently returns five configs: Bitcoin, Stacks, BOB, Rootstock, Citrea.
+
+---
+
+### `getTestnetNetworks`
+
+Returns an array of `NetworkConfig` for all testnet chains.
+
+```typescript
+function getTestnetNetworks(): NetworkConfig[]
+```
+
+**Return value:** All `NetworkConfig` entries where `testnet === true`. Currently returns five configs: Bitcoin Testnet, Stacks Testnet, BOB Testnet, Rootstock Testnet, Citrea Testnet.
+
+---
+
+### `NetworkConfig` interface
+
+```typescript
+interface NetworkConfig {
+  /** Unique network identifier, e.g. "bitcoin", "stacks", "bob" */
+  id: string;
+
+  /** Human-readable name, e.g. "Bitcoin", "Stacks", "BOB" */
+  name: string;
+
+  /**
+   * CAIP-2 chain identifier for interoperability with WalletConnect,
+   * EIP-6963, and other wallet standards.
+   */
+  caip2: string;
+
+  /** Symbol of the network's native asset, e.g. "BTC", "STX" */
+  nativeAsset: string;
+
+  /** RPC or API base URL */
+  rpcUrl: string;
+
+  /** Block explorer base URL */
+  explorerUrl: string;
+
+  /** Address format identifier, e.g. "p2wpkh", "c32check", "eip55" */
+  addressFormat: string;
+
+  /** Average block time in seconds */
+  avgBlockTimeSecs: number;
+
+  /** Whether this is a testnet */
+  testnet: boolean;
+}
+```
+
+<ResponseField name="id" type="string">
+  Short snake_case identifier. Used as the `network` field on `AssetConfig`, `LayerBalance`, `PaymentReceipt`, and adapter registrations.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Human-readable display name.
+</ResponseField>
+
+<ResponseField name="caip2" type="string">
+  Full CAIP-2 identifier. Matches the corresponding `Caip2` enum value.
+</ResponseField>
+
+<ResponseField name="nativeAsset" type="string">
+  Symbol of the chain's gas/native asset (e.g. `"ETH"` on BOB, `"RBTC"` on Rootstock, `"cBTC"` on Citrea).
+</ResponseField>
+
+<ResponseField name="rpcUrl" type="string">
+  Public RPC or REST API base URL. Override in production with a dedicated provider.
+</ResponseField>
+
+<ResponseField name="explorerUrl" type="string">
+  Block explorer base URL. Append `/tx/{txid}` to form a full transaction link.
+</ResponseField>
+
+<ResponseField name="addressFormat" type="string">
+  Encoding format for addresses on this chain: `"p2wpkh"`, `"c32check"`, or `"eip55"`.
+</ResponseField>
+
+<ResponseField name="avgBlockTimeSecs" type="number">
+  Average block interval in seconds. Bitcoin and Stacks: `600`. BOB and Citrea: `2`. Rootstock: `30`.
+</ResponseField>
+
+<ResponseField name="testnet" type="boolean">
+  `true` for testnet chains.
+</ResponseField>
+
+---
+
+### Mainnet network table
+
+| Network | CAIP-2 | Native asset | RPC URL | Block time |
+|---|---|---|---|---|
+| Bitcoin | `bip122:000000000019d6689c085ae165831e93` | BTC | `https://mempool.space/api` | 600 s |
+| Stacks | `stacks:1` | STX | `https://api.hiro.so` | 600 s |
+| BOB | `eip155:60808` | ETH | `https://rpc.gobob.xyz` | 2 s |
+| Rootstock | `eip155:30` | RBTC | `https://public-node.rsk.co` | 30 s |
+| Citrea | `eip155:4114` | cBTC | `https://rpc.mainnet.citrea.xyz` | 2 s |
+
+---
+
+### `Caip2` enum
+
+All CAIP-2 values available in `@peelbtc/types`:
+
+```typescript
+enum Caip2 {
+  BitcoinMainnet   = "bip122:000000000019d6689c085ae165831e93",
+  BitcoinTestnet   = "bip122:000000000933ea01ad0ee984209779ba",
+  StacksMainnet    = "stacks:1",
+  StacksTestnet    = "stacks:2147483648",
+  BobMainnet       = "eip155:60808",
+  BobTestnet       = "eip155:808",
+  RootstockMainnet = "eip155:30",
+  RootstockTestnet = "eip155:31",
+  CitreaMainnet    = "eip155:4114",
+  CitreaTestnet    = "eip155:5115",
+}
+```
+
+---
+
+## Asset registry
+
+### `ASSETS`
+
+A readonly array of every `AssetConfig` known to Peel. Covers Bitcoin's native BTC, Stacks' STX and sBTC, and the bridged BTC variants on each EVM L2 (tBTC on BOB, RBTC on Rootstock, cBTC on Citrea).
+
+```typescript
+const ASSETS: readonly AssetConfig[]
+```
+
+---
+
+### `getAssetsForNetwork`
+
+Returns all assets that live on the given network.
+
+```typescript
+function getAssetsForNetwork(networkId: string): AssetConfig[]
+```
+
+<ParamField path="networkId" type="string" required>
+  A `NetworkConfig.id` value, e.g. `"stacks"`, `"bob"`, `"bitcoin-testnet"`. Returns an empty array for unrecognized IDs.
+</ParamField>
+
+---
+
+### `getBridgedBtcAssets`
+
+Returns all assets where `isBridgedBtc === true`. Excludes native BTC and STX.
+
+```typescript
+function getBridgedBtcAssets(): AssetConfig[]
+```
+
+**Return value:** sBTC (mainnet + testnet), tBTC (BOB), RBTC/tRBTC (Rootstock), cBTC (Citrea mainnet + testnet).
+
+---
+
+### `getAsset`
+
+Returns a single asset by network and symbol, or `undefined` if not found.
+
+```typescript
+function getAsset(networkId: string, symbol: string): AssetConfig | undefined
+```
+
+<ParamField path="networkId" type="string" required>
+  Network id, e.g. `"stacks"`.
+</ParamField>
+
+<ParamField path="symbol" type="string" required>
+  Asset symbol, e.g. `"sBTC"`.
+</ParamField>
+
+---
+
+### `AssetConfig` interface
+
+```typescript
+interface AssetConfig {
+  /** Asset symbol, e.g. "BTC", "sBTC", "tBTC" */
+  symbol: string;
+
+  /** Human-readable name, e.g. "Bitcoin", "Stacks BTC", "Threshold BTC" */
+  name: string;
+
+  /** Network id this asset lives on */
+  network: string;
+
+  /** Number of decimal places. Bitcoin and all variants use 8; EVM assets use 18. */
+  decimals: number;
+
+  /** Whether this is a bridged/wrapped form of BTC */
+  isBridgedBtc: boolean;
+
+  /** For contract-based assets (SIP-010, ERC-20): the deployed contract address. */
+  contractAddress?: string;
+
+  /**
+   * For Stacks SIP-010 tokens: the contract name component.
+   * e.g. "sbtc-token" from "SP...contract-name"
+   */
+  contractName?: string;
+
+  /**
+   * Bridge adapter id used to acquire this asset from BTC L1.
+   * Only set for bridged assets.
+   */
+  bridgeAdapterId?: string;
+}
+```
+
+<ResponseField name="symbol" type="string">
+  Short asset symbol. Not globally unique — `"BTC"` appears on both mainnet and testnet; `"cBTC"` on both Citrea mainnet and testnet.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Full human-readable name including network qualifier for disambiguation (e.g. `"Stacks BTC (Testnet)"`).
+</ResponseField>
+
+<ResponseField name="network" type="string">
+  Matches `NetworkConfig.id`. Use this to join assets to networks.
+</ResponseField>
+
+<ResponseField name="decimals" type="number">
+  Decimal precision: `8` for BTC-denominated assets (BTC, sBTC), `6` for STX (microSTX), `18` for EVM-native assets (tBTC, RBTC, cBTC, ETH).
+</ResponseField>
+
+<ResponseField name="isBridgedBtc" type="boolean">
+  `true` for sBTC, tBTC, RBTC, cBTC. `false` for BTC (native) and STX.
+</ResponseField>
+
+<ResponseField name="contractAddress" type="string">
+  The SIP-010 (Stacks) or ERC-20 (EVM) contract address, when applicable. `undefined` for native assets (BTC, RBTC, cBTC).
+</ResponseField>
+
+<ResponseField name="contractName" type="string">
+  Stacks contract name only (the part after `.` in the full qualified name). For sBTC this is `"sbtc-token"`.
+</ResponseField>
+
+<ResponseField name="bridgeAdapterId" type="string">
+  The id of the `BridgeAdapter` that handles depositing BTC to acquire this asset. `"sbtc"`, `"tbtc"`, `"rbtc"`, or `"cbtc"`. `undefined` for non-bridged assets.
+</ResponseField>
+
+---
+
+## Usage example
+
+```typescript
+import {
+  NETWORKS,
+  getNetwork,
+  getMainnetNetworks,
+  getTestnetNetworks,
+  ASSETS,
+  getAssetsForNetwork,
+  getBridgedBtcAssets,
+  getAsset,
+} from "@peelbtc/core";
+import { Caip2 } from "@peelbtc/types";
+
+// Look up a specific network
+const bob = getNetwork(Caip2.BobMainnet);
+console.log(bob.rpcUrl);          // "https://rpc.gobob.xyz"
+console.log(bob.avgBlockTimeSecs); // 2
+
+// List all mainnet chains
+const mainnets = getMainnetNetworks();
+console.log(mainnets.map((n) => n.name));
+// ["Bitcoin", "Stacks", "BOB", "Rootstock", "Citrea"]
+
+// All assets on Stacks
+const stacksAssets = getAssetsForNetwork("stacks");
+// [{ symbol: "STX", ... }, { symbol: "sBTC", contractAddress: "SP3FBR2...", ... }]
+
+// All bridged BTC assets across all networks
+const bridged = getBridgedBtcAssets();
+console.log(bridged.map((a) => `${a.symbol} on ${a.network}`));
+// ["sBTC on stacks", "sBTC on stacks-testnet", "tBTC on bob",
+//  "RBTC on rootstock", "tRBTC on rootstock-testnet",
+//  "cBTC on citrea", "cBTC on citrea-testnet"]
+
+// Look up a specific asset
+const sbtc = getAsset("stacks", "sBTC");
+console.log(sbtc?.contractAddress); // "SP3FBR2AGK5H9QBDH3EEN6DF8EK8JY7RX8QJ5SVTE"
+console.log(sbtc?.bridgeAdapterId); // "sbtc"
+
+// Undefined for unrecognized combos
+const missing = getAsset("bitcoin", "sBTC"); // undefined
+```
+
+<Tip>
+`getAssetsForNetwork` accepts the `id` field from `NetworkConfig`, not the CAIP-2 string. Use `getNetwork(caip2).id` to convert if you're starting from a `Caip2` enum value.
+</Tip>

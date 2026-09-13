@@ -1,0 +1,176 @@
+---
+title: "Install the Peel SDK and Configure External Signing"
+sidebarTitle: "Installation"
+description: "Install @peelbtc/sdk via npm, pnpm, or yarn, configure an external signer using the SignerAdapter contract, and set up OWS for key management."
+---
+
+Peel is published to npm as a set of ESM packages under the `@peelbtc` scope. You can install the SDK directly with a package manager for use in your own application, or run a one-line script that installs the SDK and configures it as a skill for your AI coding assistant.
+
+## Requirements
+
+- **Node.js 18+** — required by all `@peelbtc` packages. The one-line installer checks this automatically.
+- **ESM project** — all packages are ESM-only (`"type": "module"`). Use `"type": "module"` in your `package.json`, or pass `--input-type=module` when running scripts directly with Node.js.
+
+## Package Manager Installation
+
+Install `@peelbtc/sdk` with your preferred package manager. The `@peelbtc/core` and `@peelbtc/types` packages are listed as dependencies of `@peelbtc/sdk` and are installed automatically — you do not need to install them separately.
+
+<CodeGroup>
+```bash npm
+npm install @peelbtc/sdk@alpha
+```
+
+```bash pnpm
+pnpm add @peelbtc/sdk@alpha
+```
+
+```bash yarn
+yarn add @peelbtc/sdk@alpha
+```
+</CodeGroup>
+
+### What Gets Installed
+
+| Package | Version | Role |
+|---|---|---|
+| `@peelbtc/sdk` | `0.1.0-alpha.2` | Routing engine, balance orchestration, transactions, bridges |
+| `@peelbtc/core` | `0.1.0-alpha.2` | Address derivation, BRID identity, recipient recovery |
+| `@peelbtc/types` | `0.1.0-alpha.2` | Shared TypeScript interfaces and enums — zero runtime logic |
+
+`@peelbtc/sdk` also installs its chain-specific dependencies: `viem` (EVM), `@stacks/transactions` (Stacks), `@rsksmart/flyover-sdk` (Rootstock Flyover bridge), and `sbtc` (sBTC bridge).
+
+### TypeScript
+
+All three packages ship full TypeScript declarations alongside their ESM and CJS builds. No `@types/` package is needed. The `types` field in each package's `exports` map is resolved automatically by TypeScript 4.7+ with `"moduleResolution": "bundler"` or `"node16"`.
+
+---
+
+## AI Agent / MCP Installation
+
+For AI coding assistants, a single command installs `@peelbtc/sdk` and copies Peel skill files (context documents, API references, bridging guides) into every detected agent directory on your machine.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ECBSJ/Peel/main/install.sh | bash
+```
+
+The script performs three steps:
+
+1. **Checks Node.js** — verifies Node.js 18+ is present and exits with a clear error if not.
+2. **Installs `@peelbtc/sdk@alpha`** — uses whichever package manager is available (`pnpm`, `npm`, or `bun`).
+3. **Installs Peel skills** — downloads the skill files from GitHub and copies them into every detected coding assistant directory under `$HOME`.
+
+Detected assistants include GitHub Copilot, Cursor, Claude Code, Amp, Codex, Gemini CLI, Windsurf, OpenCode, Goose, Continue, Roo, Kiro, Augment, and others. If no assistant directory is found the SDK is still installed and the script prints a reminder to re-run after setting one up.
+
+<Note>
+  The skill files give your coding assistant full context about Peel's API, signing conventions, bridging protocols, and routing engine — so it can generate correct Peel code without hallucinating signatures or parameters.
+</Note>
+
+---
+
+## Signing Setup
+
+Peel operates at a hard `SignerAdapter` boundary: the SDK builds unsigned transaction data and returns it to you. Your signer applies the private key and returns a signature. The SDK never sees a private key.
+
+Any signing tool that satisfies the following contract works with Peel:
+
+1. **Expose a 33-byte compressed secp256k1 public key** as a hex string (no `0x` prefix).
+2. **Sign a raw 32-byte hash** when given a `--chain bitcoin` flag (used for Bitcoin and Stacks transactions), or sign EVM-serialized transaction bytes when given a `--chain evm` flag (used for BOB, Rootstock, and Citrea).
+3. **Return a 65-byte signature** as `r(32) || s(32) || v(1)` hex.
+
+### Recommended: Open Wallet Standard (OWS)
+
+OWS is the recommended external signer for use with Peel. It is a local key management CLI that fully satisfies the SignerAdapter contract.
+
+```bash
+curl -fsSL https://docs.openwallet.sh/install.sh | bash
+```
+
+Once installed, retrieve your wallet's public key and Bitcoin address:
+
+```bash
+ows wallet info --wallet <wallet-name> --json
+```
+
+Sign a raw message (used for BRID Identity Proof):
+
+```bash
+ows sign message --wallet "<wallet-name>" --chain bitcoin \
+  --message "BRID Identity Proof:\nBitcoin Address: <address>" --json
+```
+
+Sign a raw transaction hash (used for Stacks and Bitcoin transactions):
+
+```bash
+ows sign tx --chain bitcoin --tx <32-byte-hash-hex> --wallet <wallet-name> --json
+```
+
+Sign an EVM transaction (used for BOB, Rootstock, and Citrea):
+
+```bash
+ows sign tx --chain evm --tx <serialized-tx-hex> --wallet <wallet-name> --json
+```
+
+<Warning>
+  OWS emits message signatures in `r(32) || s(32) || recovery_id(1)` layout — the recovery byte is at the **end**. The Noble cryptography library used internally by `@peelbtc/core` expects `recovery_id(1) || r(32) || s(32)`. Rotate the bytes before base64-encoding when calling `buildBridIdentityMap()`:
+
+  ```ts
+  const sigBytes = Uint8Array.from(
+    owsSig.signature.match(/.{2}/g)!.map((b) => parseInt(b, 16))
+  );
+  // Rotate: move recovery byte from index 64 to index 0
+  const rotated = new Uint8Array([sigBytes[64], ...sigBytes.subarray(0, 64)]);
+  const sigBase64 = btoa(String.fromCharCode(...rotated));
+  ```
+</Warning>
+
+### Building Identity Without a Signing Step
+
+<Tip>
+  If you already know your 33-byte compressed public key, you can build a full BRID identity map without signing anything. Use `buildIdentityFromPublicKey()` from `@peelbtc/core` — it derives all layer addresses directly from the public key with no message or signature required.
+
+  ```ts
+  import { buildIdentityFromPublicKey } from "@peelbtc/core";
+
+  const pubkeyHex = "02..."; // 33-byte compressed secp256k1 pubkey, hex
+  const pubkey = Uint8Array.from(
+    pubkeyHex.match(/.{2}/g)!.map((b) => parseInt(b, 16))
+  );
+
+  const identity = buildIdentityFromPublicKey(pubkey);
+  ```
+
+  This is the fastest path if your environment already exposes the raw public key (for example, when integrating with a hardware wallet SDK or an in-app key management library that provides the pubkey directly).
+</Tip>
+
+---
+
+## ESM Configuration
+
+All `@peelbtc` packages are published as ESM modules. The most common configuration issues and their fixes:
+
+**Node.js scripts** — add `--input-type=module` when piping scripts, or save files with `.mjs` extension:
+
+```bash
+node --input-type=module script.js
+```
+
+**`package.json` project** — add `"type": "module"` to your project root:
+
+```json
+{
+  "type": "module"
+}
+```
+
+**TypeScript** — use `"module": "NodeNext"` or `"module": "ESNext"` with `"moduleResolution": "bundler"` or `"node16"`:
+
+```json
+{
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext"
+  }
+}
+```
+
+CJS (`require()`) builds are included in the npm packages for compatibility, but the ESM path is the primary supported entry point.
