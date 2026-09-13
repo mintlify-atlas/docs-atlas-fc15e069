@@ -1,7 +1,7 @@
 ---
-title: "Network and Asset Registry Reference"
+title: "Peel Network and Asset Registry: Chains and Assets Reference"
 sidebarTitle: "Registry"
-description: "Static CAIP-2 network configs and asset configs for all chains supported by Peel: Bitcoin, Stacks, BOB, Rootstock, and Citrea."
+description: "Static CAIP-2 network configs and asset configs for all chains supported by Peel: Bitcoin, Stacks, BOB, Rootstock, and Citrea in @peelbtc/core."
 ---
 
 The registry in `@peelbtc/core` is a static, tree-shakeable record of every chain and asset Peel knows about. It exports a typed `NETWORKS` map keyed by CAIP-2 identifier, an `ASSETS` array covering native and bridged BTC assets, and a set of lookup helpers for filtering by testnet status, network, or symbol. Nothing here makes network calls — the registry is compile-time constant data that adapters, routing code, and user interfaces can rely on without fetching anything.

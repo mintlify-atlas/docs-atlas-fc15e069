@@ -1,5 +1,5 @@
 ---
-title: "BRID Identity Building and Key Recovery"
+title: "BRID Identity: Building and Recovering Cross-Chain Keys"
 sidebarTitle: "Identity"
 description: "Build a cross-chain BRID identity from a Bitcoin message signature, or recover one passively from existing on-chain transaction data."
 ---
@@ -25,7 +25,7 @@ function buildIdentityProofMessage(address: string): string
 </ParamField>
 
 **Return value:** A string with the exact format:
-```
+```text
 BRID Identity Proof:\nBitcoin Address: <address>
 ```
 
@@ -45,7 +45,7 @@ function hashBitcoinMessage(message: string): Uint8Array
 ```
 
 **Wire format:**
-```
+```text
 SHA256(SHA256(
   \x18 "Bitcoin Signed Message:\n"  // 24-byte prefix, length as single byte
   || varint(len(message))
@@ -281,7 +281,7 @@ interface RecipientRecoveryOptions {
 
 `recoverPublicKey` accepts two signature layouts in the first byte of the 65-byte signature:
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  BIP137 format (Bitcoin wallets: Sparrow, Electrum, Ledger, Trezor)     │
 │  65 bytes: [ header ] || r (32 bytes) || s (32 bytes)                   │
@@ -305,25 +305,6 @@ interface RecipientRecoveryOptions {
 <Note>
 BRID only accepts P2WPKH bech32 signatures (BIP137 header bytes 39–42). If your wallet produces a BIP137 signature with header bytes 27–38 (P2PKH or P2SH-P2WPKH), it is using a legacy address type and `recoverPublicKey` will throw with a descriptive error.
 </Note>
-
-### OWS byte-order rotation
-
-OWS emits `r || s || recovery_id` (recovery ID as the **last** byte). Noble expects `recovery_id || r || s` (recovery ID as the **first** byte). Rotate before calling:
-
-```typescript
-// OWS signature layout: [ r(32) || s(32) || recovery_id(1) ]
-function owsToNoble(owsSig: Uint8Array): Uint8Array {
-  if (owsSig.length !== 65) throw new Error("Expected 65 bytes");
-  const recoveryId = owsSig[64]; // last byte
-  const noble = new Uint8Array(65);
-  noble[0] = recoveryId;         // move to first byte
-  noble.set(owsSig.slice(0, 64), 1);
-  return noble;
-}
-
-const nobleSig = owsToNoble(owsSignatureBytes);
-const pubkey = recoverPublicKey(address, message, btoa(String.fromCharCode(...nobleSig)));
-```
 
 ---
 

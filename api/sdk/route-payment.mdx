@@ -1,5 +1,5 @@
 ---
-title: "routePayment() — Peel Routing Engine Reference"
+title: "routePayment() — Peel Payment Routing API Reference"
 sidebarTitle: "routePayment()"
 description: "Full API reference for routePayment(). Resolves the best cross-chain payment route from a RouteIntent and returns an ordered RoutePlan for agent execution."
 ---
@@ -274,7 +274,7 @@ interface StacksTransferStep {
   publicKey: string;     // 33-byte compressed pubkey hex (from OWS)
   asset: "STX" | "sBTC";
   amountSats: bigint;
-  peelMemo?: EncodedMemo; // present for STX; absent for sBTC SIP-010
+  peelMemo?: EncodedMemo; // embedded in memo field (STX) or SIP-010 memo param (sBTC)
 }
 ```
 

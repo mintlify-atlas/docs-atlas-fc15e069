@@ -1,5 +1,5 @@
 ---
-title: "Supported Bitcoin Networks and L2s"
+title: "All Networks Supported by Peel: Bitcoin L1 and L2s"
 sidebarTitle: "Networks"
 description: "Every chain Peel supports — Bitcoin L1, Stacks, BOB, Rootstock, and Citrea — with CAIP-2 IDs, RPC URLs, block times, and BTC asset details."
 ---
@@ -15,10 +15,10 @@ Peel supports Bitcoin L1 and four Bitcoin L2 networks. Every chain shares the sa
 | Stacks | `stacks:1` | L2 anchored | STX | sBTC (SIP-010) | c32check | ~600s |
 | Stacks Testnet | `stacks:2147483648` | L2 testnet | STX | sBTC | c32check | ~600s |
 | BOB | `eip155:60808` | OP Stack L2 | ETH | tBTC (ERC-20) | EIP-55 | ~2s |
-| BOB Testnet | `eip155:808813` | L2 testnet | ETH | tBTC | EIP-55 | ~2s |
+| BOB Testnet | `eip155:808` | L2 testnet | ETH | tBTC | EIP-55 | ~2s |
 | Rootstock | `eip155:30` | EVM sidechain | RBTC | RBTC (native) | EIP-55 | ~30s |
 | Rootstock Testnet | `eip155:31` | L2 testnet | tRBTC | tRBTC | EIP-55 | ~30s |
-| Citrea | `eip155:5115` | ZK rollup | cBTC | cBTC (native) | EIP-55 | ~2s |
+| Citrea | `eip155:4114` | ZK rollup | cBTC | cBTC (native) | EIP-55 | ~2s |
 | Citrea Testnet | `eip155:5115` | L2 testnet | cBTC | cBTC | EIP-55 | ~2s |
 
 ## Bitcoin L1
@@ -177,7 +177,7 @@ Citrea is Bitcoin's first ZK rollup. BTC is locked on Bitcoin L1 via the Clement
 {
   id: "citrea",
   name: "Citrea",
-  caip2: "eip155:5115",
+  caip2: "eip155:4114",
   nativeAsset: "cBTC",
   rpcUrl: "https://rpc.mainnet.citrea.xyz",
   explorerUrl: "https://explorer.citrea.xyz",

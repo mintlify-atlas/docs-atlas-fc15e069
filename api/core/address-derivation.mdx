@@ -1,7 +1,7 @@
 ---
-title: "Address Derivation from secp256k1 Public Keys"
+title: "Deriving Bitcoin, Stacks, and EVM Addresses in Peel"
 sidebarTitle: "Address Derivation"
-description: "Derive Bitcoin P2WPKH, Stacks c32check, and EVM EIP-55 addresses from a single 33-byte compressed secp256k1 public key."
+description: "Derive Bitcoin P2WPKH, Stacks c32check, and EVM EIP-55 addresses from one 33-byte compressed secp256k1 public key using @peelbtc/core."
 ---
 
 The three address derivation functions in `@peelbtc/core` translate a single 33-byte compressed secp256k1 public key into native addresses for every layer Peel supports. All three functions are pure, synchronous, and dependency-free — they use `@noble/hashes` and `@noble/curves` under the hood and never make network calls. Passing the same key to all three is the foundation of BRID: one keypair, one identity, every chain.

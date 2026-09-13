@@ -1,5 +1,5 @@
 ---
-title: "Route a Bitcoin Payment Across L1 and L2s"
+title: "Routing Bitcoin Payments Across L1 and L2 with Peel"
 sidebarTitle: "Route a Payment"
 description: "Use routePayment() to resolve the optimal route from Bitcoin L1 to any L2 — Stacks, BOB, Rootstock, or Citrea — and get a step-by-step execution plan."
 ---
@@ -68,7 +68,7 @@ The `RouteIntent` interface accepts the following fields:
 | `maxTimeSecs` | `number` | — | Exclude routes that settle slower than this (seconds) |
 | `memo` | `string` | — | Human-readable note embedded in the transaction (max 13 bytes UTF-8) |
 | `scoreWeights` | `Partial<ScoreWeights>` | — | Override the default scoring weights |
-| `onIntentResolved` | `(intent) => Promise<void>` | — | Opt-in telemetry callback fired after scoring |
+| `onIntentResolved` | `(intent: ResolvedIntent) => Promise<void>` | — | Opt-in telemetry callback fired after scoring |
 
 ### Direct transfer example (Rootstock → Rootstock)
 

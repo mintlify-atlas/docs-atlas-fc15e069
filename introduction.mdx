@@ -30,7 +30,7 @@ Peel is built around three concepts that together make cross-chain Bitcoin payme
 
 Every Bitcoin key already encodes a full cross-chain identity. BRID (Bitcoin-Rooted Identity Derivation) derives all layer addresses from a single compressed secp256k1 public key — the same key that backs your Bitcoin P2WPKH address. No chain-specific keys, no separate derivation paths.
 
-```
+```text
 pubkey → Bitcoin  (bc1q...)  via hash160 → bech32
        → Stacks   (SP...)    via hash160 → c32check
        → EVM      (0x...)    via keccak256 → EIP-55  (shared: BOB, Rootstock, Citrea)
@@ -52,7 +52,7 @@ Identity can be established by signing a BRID Identity Proof message with your B
 
 Peel is a monorepo of four packages with a strict dependency order. Each package only imports from packages below it.
 
-```
+```text
 @peelbtc/types   ← shared interfaces, zero logic
       ↑
 @peelbtc/core    ← pure crypto: address derivation, BRID identity, recipient recovery
@@ -67,7 +67,7 @@ Peel is a monorepo of four packages with a strict dependency order. Each package
 | `@peelbtc/types` | `0.1.0-alpha.2` | Shared interfaces and enums — zero logic, zero dependencies |
 | `@peelbtc/core` | `0.1.0-alpha.2` | Address derivation, BRID identity, on-chain recipient recovery |
 | `@peelbtc/sdk` | `0.1.0-alpha.2` | Routing engine, balance orchestration, transactions, bridges |
-| `@peelbtc/mcp` | planned | MCP server for AI agent payment routing |
+| `@peelbtc/mcp` | stub — v2 | MCP server for AI agent payment routing |
 
 Installing `@peelbtc/sdk` automatically installs `@peelbtc/core` and `@peelbtc/types` as dependencies.
 

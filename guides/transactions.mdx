@@ -1,5 +1,5 @@
 ---
-title: "Building and Broadcasting Chain Transactions"
+title: "Building and Broadcasting Transactions on Bitcoin L2s"
 sidebarTitle: "Transactions"
 description: "Build, prepare, sign, and broadcast transactions on BOB, Rootstock, Citrea, and Stacks using Peel's typed per-chain transaction pipelines."
 ---
@@ -8,7 +8,7 @@ Every Peel-supported chain has a typed transaction pipeline that follows the sam
 
 The general pattern is:
 
-```
+```text
 build → prepare → serialize → [external sign] → encode → broadcast
 ```
 
@@ -36,7 +36,7 @@ BOB uses **EIP-1559 type-2 transactions** with `maxFeePerGas` and `maxPriorityFe
 
 ### wBTC contract addresses
 
-```
+```text
 wBTC mainnet (BOB 60808):  0x0555E30da8f98308EdB960aa94C0Db47230d2B9c
 ```
 

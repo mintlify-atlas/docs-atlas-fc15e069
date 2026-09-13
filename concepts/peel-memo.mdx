@@ -1,5 +1,5 @@
 ---
-title: "Peel Memo: Transaction Tagging Protocol"
+title: "Peel Memo: Transaction Tagging Protocol for Bitcoin"
 sidebarTitle: "Peel Memo"
 description: "How Peel embeds a structured binary tag in every transaction to tie multi-chain execution back to a single routing decision for future indexing."
 ---
@@ -15,7 +15,7 @@ The memo is 21 to 34 bytes, depending on whether an optional user note is presen
 │  PEEL   │ version │       intentId        │  userMemo   │
 │  4 bytes│  1 byte │       16 bytes        │  0–13 bytes │
 └─────────────────────────────────────────────────────────┘
-  0x50454554  0x01     UUID as raw bytes       UTF-8
+  0x5045454c  0x01     UUID as raw bytes       UTF-8
 ```
 
 | Field | Bytes | Value | Notes |

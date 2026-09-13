@@ -1,5 +1,5 @@
 ---
-title: "EVM Recipient Identity Recovery Reference"
+title: "EVM Recipient Identity Recovery — Peel SDK Reference"
 sidebarTitle: "EVM Recovery"
 description: "Recover a full BRID identity or compressed public key from any 0x EVM address using ECDSA recovery from on-chain signed transactions."
 ---
@@ -41,8 +41,9 @@ Returns `null` if the address has no signed transaction history.
   The EVM address (`0x…`) to recover the identity for.
 </ParamField>
 
-<ParamField body="options" type="EvmRecoveryOptions" required>
-  Recovery configuration. See the `EvmRecoveryOptions` section below.
+<ParamField body="options" type="EvmRecoveryOptions">
+  Recovery configuration. Defaults to `{}` — all fields are optional.
+  See the `EvmRecoveryOptions` section below.
 </ParamField>
 
 **Return type:** `Promise<BridIdentityMap | null>`
@@ -75,8 +76,9 @@ Returns `null` if no signed transaction is found or recovery fails.
   The EVM address (`0x…`) to recover the public key for.
 </ParamField>
 
-<ParamField body="options" type="EvmRecoveryOptions" required>
-  Recovery configuration. See `EvmRecoveryOptions` below.
+<ParamField body="options" type="EvmRecoveryOptions">
+  Recovery configuration. Defaults to `{}` — all fields are optional.
+  See `EvmRecoveryOptions` below.
 </ParamField>
 
 **Return type:** `Promise<Uint8Array | null>`

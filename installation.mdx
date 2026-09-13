@@ -9,7 +9,7 @@ Peel is published to npm as a set of ESM packages under the `@peelbtc` scope. Yo
 ## Requirements
 
 - **Node.js 18+** — required by all `@peelbtc` packages. The one-line installer checks this automatically.
-- **ESM project** — all packages are ESM-only (`"type": "module"`). Use `"type": "module"` in your `package.json`, or pass `--input-type=module` when running scripts directly with Node.js.
+- **ESM project** — all packages publish `"type": "module"` and use ESM as the primary entry point (CJS compatibility builds are also included). Use `"type": "module"` in your `package.json`, or pass `--input-type=module` when running scripts directly with Node.js.
 
 ## Package Manager Installation
 
